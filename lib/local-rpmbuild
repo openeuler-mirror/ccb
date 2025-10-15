@@ -1,0 +1,489 @@
+#!/bin/bash
+# package
+# spec_name
+# spec_url
+# spec_branch
+# mount_repo_name
+# mount_repo_addr
+# mount_repo_priority
+# build_user
+# macros
+# prefer
+# preinstall
+
+. $LKP_SRC/lib/rpm.sh
+
+if [ ! -n "$spec_url" ] || [ ! -n "$spec_branch" ] || [  ! -n "$package" ] || [ ! -n "$spec_name" ] || [ ! -n "$build_user" ];then
+	echo "some params is not exists"
+	exit 99
+fi
+
+die()
+{
+	echo "$@" && exit 99
+}
+
+program_exit_exception()
+{
+	touch /tmp/.build_failed
+	if [ "$status" == "success" ];then
+		rm -f /tmp/.build_failed
+	fi
+}
+
+init_local_env()
+{
+	yum install -y rpmdevtools
+	if [[ "${build_user}" == "root" ]];then
+		rpmbuild_dir="/root/rpmbuild"
+		rpmdev-setuptree
+	else
+		useradd ${build_user}
+		rpmbuild_dir="/home/${build_user}/rpmbuild"
+		if [ -d /home/${build_user} ];then
+			chown ${build_user} /home/${build_user}
+			chgrp ${build_user} /home/${build_user}
+		else
+			mkdir -m 775 /home/${build_user}
+			chown ${build_user} /home/${build_user}
+			chgrp ${build_user} /home/${build_user}
+		fi
+		su - ${build_user} -c rpmdev-setuptree
+	fi
+	export spec_dir="${rpmbuild_dir}/SPECS"
+	export source_dir="${rpmbuild_dir}/SOURCES"
+	export build_dir="${rpmbuild_dir}/BUILD"
+}
+
+config_local_repofile()
+{
+	rm -rf /etc/yum.repos.d/*.repo
+	repofile="/etc/yum.repos.d/my.repo"
+	touch $repofile
+	i=0
+	for repo in ${repo_url[@]}
+	do
+		cat >> $repofile <<-EOF
+		[repo_${i}]
+		name=repo_${i}
+		baseurl=${repo}
+		enabled=1
+		gpgcheck=0
+		priority=${i}
+
+		EOF
+		let i=i+1
+	done
+	cat $repofile
+}
+
+config_repo()
+{
+	if [ -n "${mount_repo_addr}" ];then
+		add_repo
+	else
+		config_local_repofile
+	fi
+}
+
+config_macros()
+{
+	if [ "${build_user}" == "root" ];then
+		local rpmmacros_files="/root/.rpmmacros"
+	else
+		local rpmmacros_files="/home/${build_user}/.rpmmacros"
+	fi
+
+	if [ -n "$disable_check_path" ];then
+		for file in ${rpmmacros_files[*]}
+		do
+			[ -f "$file" ] && sed -i '/check-rpaths/ s/^/#/' "${file}"
+		done
+	fi
+
+	for file in ${rpmmacros_files[*]}
+	do
+		IFS=',' read -ra my_array <<< "$macros"
+		for line in "${my_array[@]}"
+		do
+			echo "${line}" >> "${file}"
+		done
+	done
+}
+
+config_maven_mirror()
+{
+	if [[ "${build_user}" == "root" ]];then
+		local m2="/root/.m2"
+	else
+		local m2="/home/${build_user}/.m2"
+	fi
+
+	mkdir -p "$m2"/repository
+	cat > "$m2"/settings.xml <<-EOF
+	<settings>
+		<localRepository>${m2}/repository</localRepository>
+		<mirrors>
+			<mirror>
+				<id>huaweicloud</id>
+				<name>huaweicloud</name>
+				<mirrorOf>*</mirrorOf>
+				<url>https://repo.huaweicloud.com/repository/maven/</url>
+			</mirror>
+		</mirrors>
+	</settings>
+	EOF
+	chmod 777 -R "$m2"
+}
+
+modify_etc_profile()
+{
+	local need_export_shell_pkg=(firefox)
+	if [[ ${need_export_shell_pkg[@]} =~ "${package}" ]];then
+		echo "export SHELL=/bin/shell" >> /etc/profile
+	fi
+
+	local need_export_TZ_pkg=(simple-xml)
+	if [[ ${need_export_TZ_pkg[@]} =~ "${package}" ]];then
+		echo "export TZ=GMT" >> /etc/profile
+	fi
+
+	echo "export TERM=xterm-256color" >> /etc/profile
+	echo "export TZ=Asia/Shanghai" >> /etc/profile
+	source /etc/profile
+}
+
+install_gcc_secure()
+{
+	yum install -y gcc_secure
+}
+
+sync_system_rpms()
+{
+	if [[ "${mount_repo_name}" =~ "lastest_repo" ]];then
+		dnf distro-sync -y --allowerasing --repo repo_0
+	fi
+	rm -rf /etc/yum.repos.d/openEuler.repo
+}
+
+install_pre_rpm()
+{
+	yum install -y glibc-all-langpacks glibc-locale-archive
+
+	if [ -n "${prefer}" ];then
+		yum install -y ${prefer[@]}
+	fi
+
+	if [ -n "${preinstall}" ];then
+		yum install -y ${preinstall[@]}
+	fi
+}
+
+install_other_rpm()
+{
+	local need_glassfish_pkg=(tycho httpunit h2 openwebbeans jruby jetty hive glassfish-jsp geronimo-jaxrpc apache-commons-chain grizzly)
+	if [[ ${need_glassfish_pkg[@]} =~ "${package}" ]];then
+		yum install -y glassfish-servlet-api
+	fi
+
+	local need_python3_pkg=(python-rtslib python-httplib2)
+	if [[ ${need_python3_pkg[@]} =~ "${package}" ]];then
+		yum install -y python3-devel
+	fi
+
+	local need_java180_pkg=(collectd jnr-ffi jffi eclipse java-atk-wrapper tycho relaxngcc protobuf proguard kernel libdb libtcnative brltty apache-commons-chain)
+	if [[ ${need_java180_pkg[@]} =~ "${package}" ]];then
+		yum install -y java-1.8.0-openjdk java-1.8.0-openjdk-devel
+	fi
+
+	if [ -n "$use_kmod_libs" ];then
+		if [[ ${use_kmod_libs[@]} =~ "${package}" ]];then
+			yum install -y kmod-libs
+		fi
+	fi
+
+	local need_module_pkg=(hdf5)
+	if [[ ${need_module_pkg[@]} =~ "${package}" ]];then
+		yum install -y environment-modules
+		alias module=/usr/bin/modulecmd
+	fi
+
+	yum install -y dnf-plugins-core
+}
+
+remove_rpm()
+{
+	if [ -n "${remove_rpms}" ];then
+		yum remove -y ${remove_rpms[@]}
+	fi
+}
+
+find_spec_file()
+{
+	spec_file=$(find ./${package} -name "*.spec" -type f | awk -F'/' '{print $NF}')
+	if [[ ! "${spec_file[@]}" =~ "${spec_name}" ]];then
+		die "Package: ${package} don't have spec file: ${spec_name}"
+	fi
+}
+
+check_specfile_exist()
+{
+	git config --global http.lowSpeedLimit 0
+	git config --global http.lowSpeedTime 3600
+	git config --global lfs.activitytimeout 3600
+
+	git_lfs_clone "${spec_url}" "${spec_branch}" || die "git clone failed, url: ${spec_url}"
+	if [ -n "${upstream_commit}" ];then
+		old_pwd=$(pwd)
+		cd ${package} || die "${package} directory is not exists"
+		git checkout -q ${upstream_commit} || die "git checkout ${package} to ${upstream_commit} failed"
+		cd $old_pwd
+	fi
+	find_spec_file
+}
+
+create_build_command()
+{
+	if [ -n "${spec_name}" ];then
+		echo "${spec_name}" > /.build.command
+		chmod 775 /.build.command
+	fi
+}
+
+set_project_config()
+{
+	config_macros
+	config_maven_mirror
+	modify_etc_profile
+	install_pre_rpm
+	sync_system_rpms
+	install_other_rpm
+	remove_rpm
+}
+
+yum_build_dep()
+{
+	local need_headless_pkg=(lasso libguestfs pki-core ovirt-engine)
+	if [[ ${need_headless_pkg[@]} =~ "${package}" ]];then
+		if [ "$package" == "pki-core" ];then
+			yum install -y java-latest-openjdk-headless || die "install java-latest-openjdk-headless error."
+		elif [ "$package" == "ovirt-engine" ];then
+			yum install -y java-11-openjdk-headless || die "install java-11-openjdk-headless error."
+		else
+			yum install -y java-1.8.0-openjdk-headless || die "install java-1.8.0-openjdk-headless error."
+		fi
+	fi
+	yum-builddep -y "${spec_dir}"/${spec_name} 2>&1 || die "failed to solve dependencies"
+}
+
+rpmbuild_spec()
+{
+	if [ "${skip_check}" == "y" ]; then
+		local check_flag="--nocheck"
+	else
+		local check_flag=""
+	fi
+
+	local build_stage="-ba"
+	if [ -n "${debug_stage}" ];then
+		build_stage="-${debug_stage}"
+	fi
+	if [[ "${build_user}" == "root" ]]; then
+		rpmbuild ${build_stage} ${check_flag} ${spec_dir}/${spec_name} || die "failed to build rpms by root with ${spec_name}"
+	else
+		su - ${build_user} -c "rpmbuild ${build_stage} ${check_flag} ${spec_dir}/${spec_name}" || die "failed to build rpms with ${spec_name}"
+	fi
+}
+
+download_code_repo()
+{
+	mv ${package}/*.spec "${rpmbuild_dir}/SPECS/"
+	cp -r ${package}/* "${rpmbuild_dir}/SOURCES/"
+	cp -r ${rpmbuild_dir} /root/
+}
+
+git_lfs_clone()
+{
+	for i in {1..6}
+	do
+		if [[ "${i}" -gt 1 ]];then
+			sleep 3
+		fi
+		git lfs clone ${1} -b ${2} --depth=1 2>/dev/null || continue
+		return 0
+	done
+	return 1
+}
+
+modify_spec_content()
+{
+	perl -pi -e 's# mysql-devel# mariadb-connector-c-devel#g' ${spec_dir}/*.spec
+}
+
+xz_code_dir()
+{
+	if [ -n "${use_xz}" ];then
+		if [[ ${use_xz[@]} =~ "${package}" ]];then
+			old_pwd=$(pwd)
+			cd ${source_dir}
+			for file_name in $(ls)
+			do
+				if [ -d ${file_name} ]; then
+					tar -Jcf ${file_name}.tar.xz ${file_name}
+				fi
+			done
+			cd ${old_pwd}
+		fi
+	fi
+}
+
+adapt_kernel()
+{
+	local old_pwd=$(pwd)
+	cd /tmp/
+	git_lfs_clone "https://gitee.com/openEuler/kernel" "$(cat ${source_dir}/SOURCE)"
+	tar -czvf kernel.tar.gz --exclude=.git* kernel >/dev/null
+	mv kernel.tar.gz ${source_dir} || die "failed to adapt kernel"
+	cd ${old_pwd}
+}
+
+create_kernel_gz()
+{
+	git_lfs_clone "https://gitee.com/src-openeuler/kernel.git src-kernel" "${spec_branch}"
+	local tags=$(cat src-kernel/SOURCE)
+	git_lfs_clone "https://gitee.com/openeuler/kernel" "${tags}"
+	tar -czvf kernel.tar.gz --exclude=.git* kernel >/dev/null
+	mv kernel.tar.gz ${source_dir} || die "failed to create kernel gz"
+}
+
+create_kata_integration()
+{
+	git_lfs_clone "https://gitee.com/src-openeuler/kata_integration" "${spec_branch}"
+	local file_name=$(cat ${spec_dir}/${spec_name} | grep 'Source0: '| awk '{print $NF}')
+	tar -czvf ${file_name} -C kata_integration --exclude=.git* . >/dev/null
+	mv ${file_name} ${source_dir} || die " failed to create ${file_name}"
+}
+
+create_kata_containers()
+{
+	local old_pwd=$(pwd)
+	cd /tmp/
+	git_lfs_clone "https://gitee.com/src-openeuler/kata-containers" "${spec_branch}"
+	local version=$(cat ${spec_dir}/${spec_name} | grep '%define VERSION '| awk '{print $NF}')
+	local source1_value=$(cat ${spec_dir}/${spec_name} |grep 'Source1: '|awk '{print $NF}')
+	local file_name=${source1_value/\%\{version\}/${version}}
+	tar -czvf ${file_name} -C kata-containers --exclude=.git* . >/dev/null
+	mv ${file_name} ${source_dir} || die "failed to create ${file_name}"
+	cd ${old_pwd}
+}
+
+create_kuasar_gz()
+{
+	local old_pwd=$(pwd)
+	cd /tmp/
+	git_lfs_clone "https://gitee.com/src-openeuler/kuasar" "${spec_branch}"
+	local file_name=$(cat ${spec_dir}/${spec_name} | grep 'Source0: '| awk '{print $NF}')
+	rm -f kuasar/kuasar.spec
+	tar -czvf ${file_name} -C kuasar --exclude=.git* . >/dev/null
+	mv ${file_name} ${source_dir} || die "failed to create ${file_name}"
+	cd ${old_pwd}
+}
+
+adapt_kuasar()
+{
+	create_kernel_gz
+	create_kuasar_gz
+}
+
+adapt_kata_containers()
+{
+	create_kernel_gz
+	create_kata_integration
+	create_kata_containers
+}
+
+adapt_kata_micro_kernel()
+{
+	local old_pwd=$(pwd)
+	cd /tmp/
+	local file_name=$(cat ${spec_dir}/${spec_name} | grep 'Source1: '| awk '{print $NF}'| awk -F '/' '{print $NF}')
+	tar -czvf ${file_name} -C ${source_dir} --exclude=.git* . >/dev/null
+	mv ${file_name} ${source_dir} || die "failed to create ${file_name}"
+	create_kernel_gz
+	cd ${old_pwd}
+}
+
+adapt_kata_integration()
+{
+	if [[ "${spec_name}" == "kata-micro-kernel.spec" ]];then
+		adapt_kata_micro_kernel
+	else
+		old_pwd=$(pwd)
+		cd /tmp/
+		git_lfs_clone "https://gitee.com/src-openeuler/kata_integration" "${spec_branch}"
+		local version=$(cat ${spec_dir}/${spec_name} | grep '%define VERSION' | awk '{print $NF}')
+		local name=$(cat ${spec_dir}/${spec_name}  | grep 'Name:' | awk '{print $NF}')
+		local source_value=$(cat ${spec_dir}/${spec_name} | grep 'Source0: ' | awk '{print $NF}'| awk -F '/' '{print $NF}')
+		local tmp_name=${source_value/\%\{name\}/${name}}
+		local file_name=${tmp_name/\%\{version\}/${version}}
+		tar -czvf ${file_name} --exclude=.git* kata_integration
+		mv ${file_name} ${source_dir} || die "failed to create ${file_name}"
+		cd ${old_pwd}
+	fi
+}
+
+handle_special_package()
+{
+	if [ "${package}" == "kernel" ];then
+		adapt_kernel
+	elif [ "${package}" == "kata-containers" ];then
+		adapt_kata_containers
+	elif [ "${package}" == "kuasar" ];then
+		adapt_kuasar
+	elif [ "${package}" == "kata_integration" ];then
+		adapt_kata_integration
+	fi
+}
+
+change_file_permission()
+{
+	if [[ "${build_user}" == "lkp" ]];then
+		chown -R ${build_user}:${build_user} ${rpmbuild_dir}
+	fi
+}
+
+build_rpm()
+{
+	check_specfile_exist
+	config_repo
+	init_local_env
+	set_project_config
+	download_code_repo
+	install_gcc_secure
+	create_build_command
+	modify_spec_content
+	xz_code_dir
+	handle_special_package
+	yum_build_dep
+	change_file_permission
+
+	if [ "${package}" == "glibc" ];then
+		local ld=$(echo $LD_LIBRARY_PATH)
+		export LD_LIBRARY_PATH=
+	fi
+
+	rpmbuild_spec
+
+	if [ "${package}" == "glibc" ];then
+		export LD_LIBRARY_PATH=${ld}
+	fi
+}
+
+trap program_exit_exception EXIT
+
+build_rpm
+if [ $? -ne 0 ];then
+	die "rpmbuild failed"
+else
+	status="success"
+fi

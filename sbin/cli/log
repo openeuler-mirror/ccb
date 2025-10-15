@@ -1,0 +1,82 @@
+#! /usr/bin/env ruby
+
+# frozen_string_literal: true
+
+LKP_SRC = ENV['LKP_SRC'] || File.dirname(File.dirname(File.dirname(File.realpath($PROGRAM_NAME))))
+
+require 'json'
+require 'optparse'
+require 'fileutils'
+require "#{LKP_SRC}/sbin/cli/ccb_common"
+require "#{LKP_SRC}/sbin/cli/ccb_api_client"
+
+options = OptionParser.new do |opts|
+  opts.banner = 'Usage: ccb log job_id'
+  opts.separator '    search job result log url'
+  opts.separator ''
+  opts.separator '    eg.1: ccb log cbs.1'
+
+  opts.on('-h', '--help', 'show this message') do
+    puts options
+    exit
+  end
+end
+
+options.parse!(ARGV)
+
+if ARGV.empty?
+  puts(options)
+  exit
+end
+
+job_id = ARGV[0]
+
+def log_query_hash(job_id)
+  { "index": 'jobs',
+    "query": {
+      "size": 1,
+      "_source": ['result_root'],
+      "query": { "bool": { "must": [{ "term": { "id": job_id } }] } }
+    } }
+end
+
+def search_builds_response(jwt, hash, my_config)
+  ccb_api_client = CcbApiClient.new(my_config['GATEWAY_IP'], my_config['GATEWAY_PORT'])
+  response = ccb_api_client.search(jwt, hash.to_json)
+  JSON.parse(response)
+end
+
+def get_result_root(jwt, job_id, my_config)
+  hash = log_query_hash(job_id)
+  response = search_builds_response(jwt, hash, my_config)
+
+  if response.has_key?('status_code') && (response['status_code'] == 401)
+    jwt = load_jwt?(force_update = true)
+    response = search_builds_response(jwt, hash, my_config)
+  end
+
+  source = response['hits']['hits'][0]
+  if source.nil?
+    puts "Can't find job from es"
+    exit
+  end
+
+  source['_source']['result_root']
+end
+
+my_config = load_my_config
+jwt = load_jwt?
+
+required_keys = %w[GATEWAY_IP GATEWAY_PORT SRV_HTTP_RESULT_PROTOCOL SRV_HTTP_RESULT_HOST SRV_HTTP_RESULT_PORT]
+
+required_keys.each do |var|
+  unless my_config.has_key?(var) && !my_config[var].nil?
+    puts "config #{var} not found"
+    exit
+  end
+end
+
+result_root = get_result_root(jwt, job_id, my_config)
+prefix = my_config['SRV_HTTP_RESULT_PROTOCOL'] + my_config['SRV_HTTP_RESULT_HOST'] + ':' + my_config['SRV_HTTP_RESULT_PORT'].to_s + '/api'
+
+puts File.join(prefix, result_root, '/')

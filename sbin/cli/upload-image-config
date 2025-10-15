@@ -1,0 +1,54 @@
+#! /usr/bin/env ruby
+
+# frozen_string_literal: true
+
+LKP_SRC = ENV['LKP_SRC'] || File.dirname(File.dirname(File.realpath($PROGRAM_NAME)))
+
+require 'yaml'
+require 'json'
+require 'optparse'
+require "#{LKP_SRC}/sbin/cli/ccb_common"
+require "#{LKP_SRC}/sbin/cli/ccb_api_client"
+
+json_path = nil
+yaml_path = nil
+
+options = OptionParser.new do |opts|
+  opts.banner = 'Usage: ccb upload-image-config --yaml YAML'
+  opts.separator '    eg.1: ccb upload-image-config --yaml config.yaml'
+  opts.separator 'options:'
+
+  opts.on('-y', '--yaml <path>', 'yaml file') do |y|
+    yaml_path = y
+  end
+
+  opts.on('-h', '--help', 'show this message') do
+    puts options
+    exit
+  end
+end
+
+def call_ccb_api(jwt, yaml_path)
+  config = load_my_config
+  api_client = CcbApiClient.new(config['GATEWAY_IP'], config['GATEWAY_PORT'])
+  response = api_client.upload_image_config(jwt, yaml_path)
+  response = JSON.parse(response)
+  return response
+end
+
+if $PROGRAM_NAME == __FILE__
+  if ARGV.empty?
+    puts options
+    exit
+  end
+  options.parse!(ARGV)
+
+  jwt = load_jwt?(force_update=true)
+  response = call_ccb_api(jwt, yaml_path)
+  if response.has_key?('status_code') and response['status_code'] == 401
+    jwt = load_jwt?(force_update=true) # jwt may timeout and retry once
+    response = call_ccb_api(jwt, yaml_path)
+  end
+  check_return_code(response)
+  puts JSON.pretty_generate(response)
+end

@@ -1,0 +1,99 @@
+#! /usr/bin/env ruby
+# -*- coding: utf-8 -*-
+# Copyright: Copyright © Huawei Technologies Co., Ltd. 2022. All rights reserved. Create: 2022-08-04
+# frozen_string_literal: true
+
+LKP_SRC = ENV['LKP_SRC'] || File.dirname(File.dirname(File.dirname(File.realpath($PROGRAM_NAME))))
+
+require 'json'
+require 'optparse'
+require "#{LKP_SRC}/sbin/cli/ccb_common"
+require "#{LKP_SRC}/sbin/cli/ccb_api_client"
+
+opt_set_key_value = {}
+
+options = OptionParser.new do |opts|
+  opts.banner = 'Usage: ccb cancel build_id'
+  opts.separator '    eg.1: ccb cancel 0f5be7ca-fc2f-11ec-868c-0242ac110040'
+
+  opts.on('-h', '--help', 'show this message') do
+    puts options
+    exit
+  end
+end
+
+options.parse!(ARGV)
+
+if ARGV.empty?
+  puts(options)
+  exit
+end
+
+hash = {}
+hash['build_id'] = ARGV[0]
+
+def os_project_hash(build_id)
+  { "index": 'builds',
+    "query": {
+      "size": 1,
+      "_source": ['os_project'],
+      "query": { "constant_score": { "filter": { "bool": { "must": [{ "term": { "build_id": build_id } }] } } } }
+    } }
+end
+
+def os_project_response(jwt, hash, my_config)
+  ccb_api_client = CcbApiClient.new(my_config['GATEWAY_IP'], my_config['GATEWAY_PORT'])
+  response = ccb_api_client.search(jwt, hash)
+  JSON.parse(response)
+end
+
+def get_os_project(build_id, my_config)
+  jwt = load_jwt?
+  hash = os_project_hash(build_id).to_json
+  response = os_project_response(jwt, hash, my_config)
+  if response.has_key?('status_code') && (response['status_code'] == 401)
+    jwt = load_jwt?(force_update = true)
+    response = os_project_response(jwt, hash, my_config)
+  end
+
+  source = response['hits']['hits'][0]
+  if source.nil?
+    puts "Can't find build_id from es"
+    exit
+  end
+
+  source['_source']['os_project']
+end
+
+def cancel_response(jwt, os_project, hash, my_config)
+  ccb_api_client = CcbApiClient.new(my_config['GATEWAY_IP'], my_config['GATEWAY_PORT'])
+  response = ccb_api_client.abort_build(jwt, os_project, hash.to_json)
+  response = JSON.parse(response)
+end
+
+def cancel_build(jwt, os_project, hash, my_config)
+  response = cancel_response(jwt, os_project, hash, my_config)
+  if response.has_key?('status_code') && (response['status_code'] == 401)
+    jwt = load_jwt?(force_update = true)
+    response = cancel_response(jwt, os_project, hash, my_config)
+  end
+
+  check_return_code(response)
+  puts JSON.pretty_generate response
+end
+
+my_config = load_my_config
+jwt = load_jwt?
+
+required_keys = %w[GATEWAY_IP GATEWAY_PORT]
+
+required_keys.each do |var|
+  unless my_config.has_key?(var) && !my_config[var].nil?
+    puts "config #{var} not found"
+    exit
+  end
+end
+
+build_id = hash['build_id']
+os_project = get_os_project(build_id, my_config)
+cancel_build(jwt, os_project, hash, my_config)

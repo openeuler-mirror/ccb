@@ -1,0 +1,111 @@
+#! /usr/bin/env ruby
+
+# frozen_string_literal: true
+
+LKP_SRC = ENV['LKP_SRC'] || File.dirname(File.dirname(File.dirname(File.realpath($PROGRAM_NAME))))
+
+require 'yaml'
+require 'json'
+require 'optparse'
+require "#{LKP_SRC}/sbin/cli/ccb_common"
+require "#{LKP_SRC}/sbin/cli/ccb_api_client"
+
+os_project = nil
+archs = ['x86_64', 'aarch64']
+
+options = OptionParser.new do |opts|
+  opts.banner = 'Usage: ccb ls -p os_project <repo> -a <arch>'
+  opts.separator '    eg.1: ccb ls -p openEuler:Mainline kernel -a aarch64'
+  opts.separator 'options:'
+
+  opts.on('-p', '--project <os_project>', 'specifies the project to query') do |p|
+    os_project = p
+  end
+  opts.on('-a', '--arch <arch>', 'specifies the arch for the query') do |a|
+    archs = [a]
+  end
+
+  opts.on('-h', '--help', 'show this message') do
+    puts options
+    exit
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  if ARGV.empty?
+    puts options
+    exit
+  end
+  options.parse!(ARGV)
+
+  if ARGV.empty?
+    puts 'please set the queried repo'
+    puts(options)
+    exit
+  end
+
+  if !os_project
+    puts 'please use -p to set the os project'
+    puts(options)
+    exit
+  end
+
+  request_info = {
+    'index' => 'rpms',
+    'query' => {
+      'query' => {},
+      'size' => 0,
+      'aggs' => {
+        'group_by_spec_name' => {
+          'terms' => {
+            'field' => 'spec_name',
+            'min_doc_count' => 1,
+          },
+          'aggs' => {
+            'top1' => {
+              'top_hits' => {
+                'size' => 1,
+                'sort' => [{"submit_time"=>{"order"=>"desc"}}]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  repo_info = ARGV[0].split(':')
+  repo_name = repo_info[0]
+  spec_name = repo_info[1]
+
+  res = {}
+  archs.each do |arch|
+    res[arch] = {}
+    must_body = []
+    query_hash = {
+      'architecture' => arch,
+      'os_project' => os_project,
+      'repo_name' => repo_name,
+    }
+    query_hash.each do |k, v|
+      must_body.append({'term' =>  {k => v}})
+    end
+    request_info['query']['query'] = {'constant_score' => {'filter' => {'bool' => {'must' => must_body}}}}
+    jwt = load_jwt?
+    config = load_my_config
+    api_client = CcbApiClient.new(config['GATEWAY_IP'], config['GATEWAY_PORT'])
+    response = api_client.search(jwt, request_info.to_json)
+    response = JSON.parse(response)
+    if response.has_key?('status_code') and response['status_code'] == 401
+      jwt = load_jwt?(force_update=true) # jwt may timeout and retry once
+      api_client = CcbApiClient.new(config['GATEWAY_IP'], config['GATEWAY_PORT'])
+      response = api_client.search(jwt, request_info.to_json)
+      response = JSON.parse(response)
+    end
+    check_return_code(response)
+    response['aggregations']['group_by_spec_name']['buckets'].each do |rpm|
+      next if spec_name && spec_name != rpm['key']
+      res[arch][rpm['key']] = rpm['top1']['hits']['hits'][0]['_source']['rpms_detail'].keys
+    end
+  end
+  puts JSON.pretty_generate(res)
+end

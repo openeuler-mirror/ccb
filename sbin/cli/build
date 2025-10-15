@@ -1,0 +1,150 @@
+#! /usr/bin/env ruby
+# -*- coding: utf-8 -*-
+# Copyright: Copyright © Huawei Technologies Co., Ltd. 2022. All rights reserved. Create: 2022-08-04
+# frozen_string_literal: true
+
+LKP_SRC = ENV['LKP_SRC'] || File.dirname(File.dirname(File.dirname(File.realpath($PROGRAM_NAME))))
+
+require 'json'
+require 'optparse'
+require "#{LKP_SRC}/sbin/cli/ccb_common"
+require "#{LKP_SRC}/sbin/cli/ccb_api_client"
+
+json_path = nil
+yaml_path = nil
+
+options = OptionParser.new do |opts|
+  opts.banner = 'Usage: ccb build key1=val1 key2=val2 -j JSON|-y YAML...'
+  opts.separator ''
+  opts.separator '    eg.1: ccb build os_project=openEuler:Mainline build_type=full -j JSON|-y YAML'
+  opts.separator '    eg.2: ccb build snapshot_id=123456 build_type=incremental -j JSON|-y YAML'
+  opts.separator ''
+
+  opts.on('-j', '--json <path>', 'json file') do |j|
+    json_path = j
+  end
+
+  opts.on('-y', '--yaml <path>', 'yaml file') do |y|
+    yaml_path = y
+  end
+
+  opts.on('-h', '--help', 'show this message') do
+    puts options
+    exit
+  end
+end
+
+options.parse!(ARGV)
+
+if ARGV.empty?
+  puts(options)
+  exit
+end
+
+def os_project_hash(snapshot_id)
+  { "index": 'snapshots',
+    "query": {
+      "size": 1,
+      "_source": ['os_project'],
+      "query": { "bool": { "must": [{ "term": { "snapshot_id": snapshot_id } }] } }
+    } }
+end
+
+def build_target_hash(os_project)
+  { "index": 'projects',
+    "query": {
+      "size": 1,
+      "_source": ['build_targets'],
+      "query": { "bool": { "must": [{ "term": { "os_project": os_project } }] } }
+    } }
+end
+
+def os_project_response(jwt, hash, my_config)
+  ccb_api_client = CcbApiClient.new(my_config['GATEWAY_IP'], my_config['GATEWAY_PORT'])
+  response = ccb_api_client.search(jwt, hash)
+  JSON.parse(response)
+end
+
+def get_os_project(jwt, snapshot_id, my_config)
+  hash = os_project_hash(snapshot_id).to_json
+  response = os_project_response(jwt, hash, my_config)
+
+  if response.has_key?('status_code') && (response['status_code'] == 401)
+    jwt = load_jwt?(force_update = true)
+    response = os_project_response(jwt, hash, my_config)
+  end
+
+  source = response['hits']['hits'][0]
+  exit if source.nil?
+  source['_source']['os_project']
+end
+
+def get_build_targets(jwt, os_project, arch, my_config)
+  hash = build_target_hash(os_project).to_json
+  response = os_project_response(jwt, hash, my_config)
+
+  if response.has_key?('status_code') && (response['status_code'] == 401)
+    jwt = load_jwt?(force_update = true)
+    response = os_project_response(jwt, hash, my_config)
+  end
+
+  source = response['hits']['hits'][0]
+  exit if source.nil?
+  build_targets = source['_source']['build_targets']
+  build_targets.each do |build_target|
+    return [build_target] if build_target['architecture'] == arch
+  end
+  puts 'input arch not contains in project.build_targets'
+  exit
+end
+
+def build_dag_response(os_project, jwt, hash, my_config)
+  ccb_api_client = CcbApiClient.new(my_config['GATEWAY_IP'], my_config['GATEWAY_PORT'])
+  response = ccb_api_client.build_dag(jwt, os_project, hash.to_json)
+  response = JSON.parse(response)
+end
+
+def build_tag_result(jwt, os_project, hash, my_config)
+  response = build_dag_response(os_project, jwt, hash, my_config)
+  if response.has_key?('status_code') && (response['status_code'] == 401)
+    jwt = load_jwt?(force_update = true)
+    response = build_dag_response(os_project, jwt, hash, my_config)
+  end
+
+  check_return_code(response)
+  puts JSON.pretty_generate response
+end
+
+hash = get_no_option_paras!(ARGV, json_path, yaml_path)[0]
+os_project = hash['os_project'] || ''
+snapshot_id = hash['snapshot_id'] || ''
+build_type = hash['build_type'] || ''
+arch = hash['arch'] || ''
+
+if os_project.empty? && snapshot_id.empty?
+  puts 'Both empty are not allowed for argument: os_project, snapshot_id'
+  exit
+end
+
+if build_type.empty?
+  puts "build_type can't be empty"
+  exit
+end
+
+my_config = load_my_config
+jwt = load_jwt?
+
+required_keys = %w[GATEWAY_IP GATEWAY_PORT]
+
+required_keys.each do |var|
+  unless my_config.has_key?(var) && !my_config[var].nil?
+    puts "config #{var} not found"
+    exit
+  end
+end
+
+os_project = get_os_project(jwt, snapshot_id, my_config) if os_project.empty?
+
+hash['build_targets'] = get_build_targets(jwt, os_project, arch, my_config) unless arch.empty?
+
+build_tag_result(jwt, os_project, hash, my_config)

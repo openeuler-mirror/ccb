@@ -1,0 +1,472 @@
+#! /usr/bin/env ruby
+
+# frozen_string_literal: true
+
+LKP_SRC = ENV['LKP_SRC'] || File.dirname(File.dirname(File.dirname(File.realpath($PROGRAM_NAME))))
+
+require 'json'
+require 'yaml'
+require 'optparse'
+require 'rbconfig'
+require 'fileutils'
+require "#{LKP_SRC}/sbin/cli/ccb_common"
+require "#{LKP_SRC}/sbin/cli/ccb_api_client"
+
+debug_flag = false
+debug_stage = nil
+clean_flag = false
+config_hash = {}
+dailybuild_hash = {"local" => "http://172.16.1.236:31744",
+                   "remote" => "http://121.36.84.172"}
+
+options = OptionParser.new do |opts|
+  opts.banner = 'Usage: ccb local-build key1=val1 key2=val2... [options]'
+  opts.separator ''
+
+  opts.separator '    eg.1: ccb local-build os_project=openEuler:Mainline package=gcc --rm --debug=bp'
+  opts.separator '    eg.2: ccb local-build os_project=openEuler:Mainline package=gcc spec=gcc.spec --rm --debug=bp'
+  opts.separator ''
+  opts.separator 'options:'
+
+  opts.on('--rm', 'clean container') do
+    clean_flag = true
+  end
+
+  opts.on('--debug [stage]', 'set rpmbuild debug stage, include: bp/bc/bi') do |debug|
+    debug_flag = true
+    debug_stage = debug
+  end
+
+  opts.on('-h', '--help', 'show this message') do
+    puts options
+    exit
+  end
+end
+
+if ARGV.empty?
+  puts(options)
+  exit
+end
+
+begin
+  options.parse!(ARGV)
+rescue => e
+  puts options
+  puts "\n#{e.message}"
+  exit
+end
+
+need_keys = ['os_project', 'package', 'spec']
+
+begin
+  ARGV.each do |arg|
+    value = ""
+    info = arg.split('=', 2)
+    key = info[0]
+    value = info[1] || ''
+    if need_keys.include?(key)
+      if value.length == 0
+        puts options
+        puts "\n[ERROR] The parameter: #{key} requires a value"
+        exit
+      else
+        config_hash[key] = value.strip
+      end
+    else
+      puts options
+      exit
+    end
+  rescue => e
+    puts options
+    puts "\n#{e.message}"
+    exit
+  end
+end
+
+
+def get_response(jwt, hash, my_config)
+  ccb_api_client = CcbApiClient.new(my_config['GATEWAY_IP'], my_config['GATEWAY_PORT'])
+  response = ccb_api_client.search(jwt, hash)
+  response = JSON.parse(response)
+  check_return_code(response)
+  response
+end
+
+def search_snapshots_info(os_project, my_config, config_hash)
+  query = {"index": 'snapshots',
+           "query": {
+             "size": 1,
+             "_source": ["spec_commits"],
+             "query": {"bool": {"must": [{"term": {"os_project": os_project}}, {"term": {"is_trunk": true}}]}},
+             "sort": [{'create_time' => {"order": 'desc'}}]
+           }}
+  jwt = load_jwt?(force_update = true)
+  response = get_response(jwt, query.to_json, my_config)
+  source = response['hits']['hits'][0]
+  if source.nil?
+    puts "[ERROR] The project:#{os_project} doesn't have package:#{config_hash['package']}"
+    exit
+  end
+  source['_source']
+end
+
+def search_project_info(os_project, my_config)
+  query = {"index": 'projects',
+           "query": {
+             "size": 1,
+             "_source": ["spec_branch", "build_targets", "bootstrap_rpm_repo", "build_env_macros", "package_overrides", "package_repos"],
+             "query": {"bool": {"must": ["term": {"os_project": os_project}]}}
+           }}
+  jwt = load_jwt?(force_update = true)
+  response = get_response(jwt, query.to_json, my_config)
+  source = response['hits']['hits'][0]
+  if source.nil?
+    puts "[ERROR] Not found the project: #{os_project}"
+    exit
+  end
+  source['_source']
+end
+
+def search_builds_info(os_project, arch, my_config)
+  query = {"index": 'builds',
+           "query": {
+             "size": 10,
+             "_source": ['emsx', 'build_target', 'snapshot_id', 'repo_id', 'build_type'],
+             "query": {"bool": {"must": [{"term": {"os_project": os_project}}, {"term": {"build_target.architecture": arch}}]}},
+             "sort": [{'create_time' => {"order": 'desc'}}]
+           }}
+  jwt = load_jwt?(force_update = true)
+  response = get_response(jwt, query.to_json, my_config)
+  source = response['hits']['hits']
+  if source.nil?
+    puts "[ERROR] Not found last 10 times builds of the project: #{os_project}"
+    exit
+  end
+  source
+end
+
+def check_project_package_exists(os_project, my_config, config_hash)
+  result = search_project_info(os_project, my_config)
+  if result.has_key?("package_repos")
+    result["package_repos"].each do |prs|
+      if prs["spec_name"] == config_hash["package"]
+        return result,"prs"
+      end
+    end
+  end
+
+  result = search_snapshots_info(os_project, my_config, config_hash)
+  if result["spec_commits"].has_key?(config_hash["package"])
+    return result['spec_commits'][config_hash['package']],"scs"
+  end
+
+  puts "[ERROR] The project:#{os_project} doesn't have package:#{config_hash['package']}"
+  exit
+end
+
+def modify_config_hash(data_hash, config_hash)
+  config_hash["branch"] = data_hash["spec_branch"] || ''
+  config_hash["build_env_macros"] = data_hash["build_env_macros"] || ''
+  bootstrap_repo = data_hash["bootstrap_rpm_repo"] || ''
+  unless bootstrap_repo.empty?
+    repos = ""
+    bootstrap_repo.each do |btsr|
+      repos = repos + " " + btsr["repo"]
+    end
+    config_hash["bootstrap_rpm_repo"] = repos || ''
+  end
+end
+
+def parse_builds_info(project_name, builds_info)
+  tmp_hash = {}
+  builds_info.each do |builds|
+    builds_source = builds["_source"]
+    if builds_source["snapshot_id"].nil? || builds_source["repo_id"].nil? || builds_source["build_type"] == "single"
+      next
+    else
+      tmp_hash["os_project"] = project_name
+      tmp_hash["emsx"] = builds_source["emsx"] || 'ems1'
+      tmp_hash["snapshot_id"] = builds_source["snapshot_id"] || ''
+      tmp_hash["repo_id"] = builds_source["repo_id"] || ''
+
+      build_target = builds_source["build_target"] || ''
+      unless build_target.empty?
+        tmp_hash["os_variant"] = build_target["os_variant"] || ''
+        tmp_hash["arch"] = build_target["architecture"] || ''
+      end
+      break
+    end
+  end
+  tmp_hash
+end
+
+def get_projects_data(os_project, my_config, config_hash)
+  projects_info = []
+  project_result = search_project_info(os_project, my_config)
+  modify_config_hash(project_result, config_hash)
+
+  builds_info = search_builds_info(os_project, config_hash['arch'], my_config)
+  tmp_hash = parse_builds_info(os_project, builds_info)
+  if tmp_hash.empty?
+    puts "[Warning] The project: #{os_project} has no available repo address for the last 10 times"
+  end
+  projects_info << tmp_hash
+
+  ground_projects = nil
+  unless project_result["build_targets"].empty?
+    project_result["build_targets"].each do |bt_hash|
+      if bt_hash["architecture"] == config_hash["arch"]
+        unless bt_hash["ground_projects"].empty?
+          ground_projects = bt_hash["ground_projects"]
+        end
+      end
+    end
+  end
+  unless ground_projects.nil?
+    ground_projects.each do |project|
+      result = search_builds_info(project, config_hash['arch'], my_config)
+      tmp_hash = parse_builds_info(project, result)
+      if tmp_hash.empty?
+        puts "[Warning] The project: #{os_project} has no available repo address for the last 10 times"
+      else
+        projects_info << tmp_hash
+      end
+    end
+  end
+  return projects_info
+end
+
+def get_package_data(config_hash, data, flag)
+  spec_url = ""
+  spec_branch = ""
+  if flag == "prs"
+    if data.has_key?("package_repos")
+      data["package_repos"].each do |prs|
+        if prs["spec_name"] == config_hash["package"]
+          spec_url = prs["spec_url"] || ''
+          spec_branch = prs["spec_branch"] || ''
+          break
+        end
+      end
+    end
+
+    if data.has_key?("package_overrides")
+      if data["package_overrides"].has_key?(config_hash["package"])
+        if data["package_overrides"][config_hash["package"]].has_key?("spec_url")
+          spec_url = data["package_overrides"][config_hash["package"]]["spec_url"] || ''
+        end
+        if data["package_overrides"][config_hash["package"]].has_key?("spec_branch")
+          spec_branch = data["package_overrides"][config_hash["package"]]["spec_branch"] || ''
+        end
+      end
+    end
+
+    if spec_branch.length == 0
+      spec_branch = data["spec_branch"] || ''
+    end
+  end
+
+  if flag == "scs"
+    spec_branch = data["spec_branch"] || ''
+    spec_url = data["spec_url"] || ''
+  end
+
+  if spec_branch.length == 0 || spec_url.length == 0
+    puts "[ERROR] The gitee url and branch of package: #{config_hash['package']} are not found in the project: #{config_hash['os_project']}"
+    exit
+  else
+    config_hash["spec_url"] = spec_url
+    config_hash["spec_branch"] = spec_branch
+  end
+end
+
+def construct_repo_url(projects_info, config_hash, dailybuild_hash)
+  repourl_array = []
+  unless projects_info.empty?
+    projects_info.each do |project|
+      if project["emsx"].nil? || project['os_project'].nil? || project["os_variant"].nil? || project["arch"].nil?
+        next
+      else
+        repo = "#{config_hash['repo_prefix']}/api/#{project['emsx']}/repositories/#{project['os_project']}/#{project['os_variant']}/#{project['arch']}/history/#{project['snapshot_id']}/steps/#{project['repo_id']}"
+        repourl_array << repo
+      end
+    end
+  end
+
+  unless config_hash["bootstrap_rpm_repo"].nil?
+    config_hash["bootstrap_rpm_repo"].split().each do |url|
+      tmp_url = url.gsub(/http:\/\/192\.168\.\d+\.\d+\:\d+/, config_hash['repo_prefix'])
+      new_url = tmp_url.gsub(dailybuild_hash["local"], dailybuild_hash["remote"])
+      repo_url = new_url + "/#{config_hash['arch']}"
+      repourl_array << repo_url
+    end
+  end
+
+  if repourl_array.empty?
+    puts("[ERROR] No repo source is available, unable to build")
+    exit
+  end
+  repourl_array
+end
+
+def parse_config_info(config_hash)
+  if config_hash.empty?
+    exit
+  end
+  file_str = ""
+  tmp_array = ["preinstall", "prefer", "use_xz", "disable_check_path", "use_kmod_libs", "use_git_lfs"]
+  tmp_config_hash = config_hash.dup
+  tmp_config_hash.each do |key, value|
+    if key == "build_env_macros" && value.length != 0
+      yaml_data = YAML.load(value)
+      yaml_data.each do |key1, value1|
+        if key1 == "remove_rpms"
+          tmp_pkg = ""
+          value1.each do |key2, value2|
+            if value2.include?(config_hash["package"])
+              tmp_pkg = key2 + " " + tmp_pkg
+            end
+          end
+          file_str += "export #{key1}=\"#{tmp_pkg}\"\n"
+        elsif key1 == "macros"
+          file_str += "export #{key1}=\"#{value1.join(',')}\"\n"
+        elsif key1 == "use_root"
+          if value1.include?(config_hash["package"])
+            file_str += "export #{key1}=\"y\"\n"
+            file_str += "export build_user=\"root\"\n"
+            config_hash["build_user"] = "root"
+          end
+        elsif tmp_array.include?(key1)
+          file_str += "export #{key1}=\"#{value1.join(' ')}\"\n"
+        else
+          file_str += "export #{key1}=\"#{value1}\"\n"
+        end
+      end
+    else
+      file_str += "export #{key}=\"#{value}\"\n"
+    end
+  end
+  file_str
+end
+
+def write_config_file(config_hash, repo_array)
+  %x(rm -rf #{config_hash['output_dir']} && mkdir -p #{config_hash['output_dir']})
+  File.open(config_hash["config_file_path"], "w") do |file|
+    file_str = parse_config_info(config_hash)
+    file.write(file_str)
+    file.write("export repo_url=\"#{repo_array.join(' ')}\"\n")
+  end
+end
+
+def download_docker_image(config_hash, dailybuild_hash)
+  image_id = nil
+  image_name = "openEuler-docker.#{config_hash['arch']}.tar.xz"
+  image_url = "#{dailybuild_hash['remote']}/EulerMaker/#{config_hash['branch']}/docker_img/#{config_hash['arch']}/#{image_name}"
+  puts "[INFO] Download docker image, please wait"
+  %x(wget #{image_url} -P #{config_hash['output_dir']} -q --show-progress)
+  image_id=%x(docker load -i #{config_hash['output_dir']}/#{image_name} | awk -F':' '{print $NF}')
+  %x(rm -f #{config_hash['output_dir']}/#{image_name})
+  if image_id.nil?
+    puts "[ERROR] Docker load failed"
+    exit
+  end
+  image_id
+end
+
+def build_package(image_id, clean_flag, config_hash)
+  container_name = "local-build-#{config_hash["package"]}"
+  %x(docker rm -f #{container_name} &>/dev/null)
+  system("docker run -itd --net=host --name #{container_name} #{image_id} /bin/bash -c 'exit'")
+  exec_result=$?.exitstatus
+  if exec_result != 0
+    puts "[ERROR] Run a container failed"
+    exit
+  end
+  %x(docker cp #{LKP_SRC} #{container_name}:/lkp-tests)
+  %x(docker cp #{config_hash["config_file_path"]} #{container_name}:/tmp/)
+  system("docker exec -it #{container_name} /bin/bash -c 'source /tmp/.project_config;bash /lkp-tests/lib/local-rpmbuild 2>&1 | tee /build.log'")
+  %x(docker cp #{container_name}:/build.log #{config_hash["output_dir"]})
+  %x(docker cp #{container_name}:/tmp/.build_failed #{config_hash["output_dir"]} 2>/dev/null)
+  if File.exist?("#{config_hash['output_dir']}/.build_failed")
+    puts "[ERROR] Build failed"
+    exit
+  else
+    if config_hash['debug_stage'].nil?
+      puts "[INFO] Build success"
+    else
+      puts "[INFO] Build success with debug:#{config_hash['debug_stage']}"
+    end
+  end
+  if config_hash['debug_stage'].nil?
+    if config_hash['build_user'] == "lkp"
+      rpmbuild_dir = "/home/lkp/rpmbuild"
+    else
+      rpmbuild_dir = "/root/rpmbuild"
+    end
+    %x(docker cp #{container_name}:#{rpmbuild_dir}/SRPMS #{config_hash["output_dir"]})
+    %x(docker cp #{container_name}:#{rpmbuild_dir}/RPMS #{config_hash["output_dir"]})
+  end
+  puts "[INFO] Output_dir: #{config_hash["output_dir"]}"
+  if clean_flag
+    %x(docker rm -f #{container_name} &>/dev/null)
+  else
+    id = %x(docker ps -qf"name=#{container_name}")
+    puts "[INFO] Container_id: #{id}"
+  end
+end
+
+
+os_project = config_hash['os_project'] || ''
+package = config_hash['package'] || ''
+spec_name = config_hash['spec'] || ''
+
+if os_project.empty? || package.empty?
+  puts options
+  puts '[ERROR] Both empty are not allowed for argument: os_project, package'
+  exit
+end
+
+if debug_flag
+  if debug_stage.nil?
+    puts options
+    puts "\n[ERROR] argument --debug: expected one argument"
+    exit
+  else
+    unless ["bp", "bc", "bi"].include?(debug_stage)
+      puts options
+      puts "\n[ERROR] argument --debug not support: #{debug_stage}"
+      exit
+    end
+  end
+end
+
+if spec_name.empty?
+  config_hash["spec_name"] = "#{package}.spec"
+else
+  config_hash["spec_name"] = spec_name
+end
+
+my_config = load_my_config
+if my_config.has_key?("SRV_URL")
+  config_hash['repo_prefix'] = my_config['SRV_URL']
+else
+  puts "[ERROR] Please add the SRV_URL configuration item to the #{ENV['HOME']}/.config/cli/defaults/config.yaml config file"
+  exit
+end
+
+arch = RbConfig::CONFIG['arch'].split('-')[0]
+config_hash["arch"] = arch
+config_hash['LKP_SRC'] = "/lkp-tests"
+config_hash["build_user"] = "lkp"
+config_hash['output_dir'] = "/tmp/#{os_project}/#{package}"
+config_hash['config_file_path'] = "#{config_hash['output_dir']}/.project_config"
+config_hash["debug_stage"] = debug_stage
+
+check_result, flag = check_project_package_exists(os_project, my_config, config_hash)
+get_package_data(config_hash, check_result, flag)
+result = search_builds_info(os_project, arch, my_config)
+projects_info = get_projects_data(os_project, my_config, config_hash)
+repo_array = construct_repo_url(projects_info, config_hash, dailybuild_hash)
+write_config_file(config_hash, repo_array)
+image_id = download_docker_image(config_hash, dailybuild_hash)
+build_package(image_id, clean_flag, config_hash)

@@ -1,0 +1,108 @@
+#! /usr/bin/env ruby
+
+# frozen_string_literal: true
+
+LKP_SRC = ENV['LKP_SRC'] || File.dirname(File.dirname(File.dirname(File.realpath($PROGRAM_NAME))))
+
+require 'yaml'
+require 'json'
+require 'optparse'
+require "#{LKP_SRC}/sbin/cli/ccb_common"
+require "#{LKP_SRC}/sbin/cli/ccb_api_client"
+
+field_info = nil
+rpm_path = nil
+
+options = OptionParser.new do |opts|
+  opts.banner = 'Usage: ccb query -f <info> -r <rpm_path>'
+  opts.separator '    eg.1: ccb query -f job_id,build_id -r /home/openssl-debuginfo-1.1.1m-16.0e2203sp2.aarch64.rpm'
+  opts.separator 'options:'
+
+  opts.on('-f', '--field <field list>', 'field need return, format: --field \'field1,field2,...\'') do |f|
+    field_info = f
+  end
+
+  opts.on('-r', '--rpm <rpm_path>', 'specifies the rpm_path to query') do |r|
+    rpm_path = r
+  end
+
+  opts.on('-h', '--help', 'show this message') do
+    puts options
+    exit
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  if ARGV.empty?
+    puts options
+    exit
+  end
+
+  begin
+    options.parse!(ARGV)
+  rescue => e
+    puts e.message
+    puts options
+    exit
+  end
+
+  if !field_info
+    puts 'please use -f to set the field need return'
+    puts(options)
+    exit
+  end
+
+  if !rpm_path
+    puts 'please use -r to set the rpm_path'
+    puts(options)
+    exit
+  end
+
+  info = get_list_paras!(field_info)
+
+  temple_keys = ['job_id', 'os_project', 'build_id', 'rpm_path', 'repo_es_key_id']
+  info.each do |key|
+    next if temple_keys.include?(key)
+    puts "not support query field: #{key}"
+    exit
+  end
+
+  pkgid = %x(rpm -q --qf '%{PKGID}' #{rpm_path})
+
+  unless pkgid.match(/[a-z0-9]{32}/)
+    puts "can not get pkgid according to #{rpm_path}"
+    exit
+  end
+
+  request_info = {
+    'index' => 'rpms',
+    'query' => {
+      'size' => 1,
+      'query' => {'constant_score' => {'filter' => {'bool' => {'must' => [{'term' => {'rpms.pkgid' => pkgid}}]}}}},
+      '_source' => info
+    }
+  }
+
+  res = {}
+  jwt = load_jwt?
+  config = load_my_config
+  api_client = CcbApiClient.new(config['GATEWAY_IP'], config['GATEWAY_PORT'])
+  response = api_client.search(jwt, request_info.to_json)
+  response = JSON.parse(response)
+  if response.has_key?('status_code') and response['status_code'] == 401
+    jwt = load_jwt?(force_update=true) # jwt may timeout and retry once
+    api_client = CcbApiClient.new(config['GATEWAY_IP'], config['GATEWAY_PORT'])
+    response = api_client.search(jwt, request_info.to_json)
+    response = JSON.parse(response)
+  end
+  check_return_code(response)
+  search_result = response['hits']['hits']
+  if search_result.empty?
+    res['result'] = 'failed'
+    res['details'] = {'reason' => 'no job_id found'}
+  else
+    res['result'] = 'success'
+    res['details'] = search_result[0]['_source']
+  end
+  puts JSON.pretty_generate(res)
+end

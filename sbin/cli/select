@@ -1,0 +1,97 @@
+#! /usr/bin/env ruby
+
+# frozen_string_literal: true
+
+LKP_SRC = ENV['LKP_SRC'] || File.dirname(File.dirname(File.dirname(File.realpath($PROGRAM_NAME))))
+
+require 'yaml'
+require 'json'
+require 'optparse'
+require "#{LKP_SRC}/sbin/cli/ccb_common"
+require "#{LKP_SRC}/sbin/cli/ccb_api_client"
+
+field_info = nil
+sort_info = nil
+json_path = nil
+yaml_path = nil
+size = 10000
+
+options = OptionParser.new do |opts|
+  opts.banner = 'Usage: ccb select <index> k=v|--json JSON|--yaml YAML --sort --field'
+  opts.separator '    eg.1: ccb select snapshots <os_project=>openEuler:Mainline -f' \
+                    ' \'snapshot_id,create_time\' --sort \'create_time:desc,snapshot_id:asc\' --size 1'
+  opts.separator 'options:'
+
+  opts.on('-f', '--field <field list>', 'field need return, format: --field \'field1,field2,...\'') do |f|
+    field_info = f
+  end
+  opts.on('-s', '--sort <sort_rule>', 'sort rule, format: --sort \'<field1>:asc/desc,<field2>:asc/desc,...\'') do |s|
+    sort_info = s
+  end
+  opts.on('-j', '--json <path>', 'json file') do |j|
+    json_path = j
+  end
+  opts.on('-y', '--yaml <path>', 'yaml file') do |y|
+    yaml_path = y
+  end
+  opts.on('--size <size>', 'es query size') do |s|
+    size = s
+  end
+
+  opts.on('-h', '--help', 'show this message') do
+    puts options
+    exit
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  if ARGV.empty?
+    puts options
+    exit
+  end
+  options.parse!(ARGV)
+
+  sort_paras = get_sort_paras!(sort_info) if not sort_info.nil?
+  field_paras = get_list_paras!(field_info) if not field_info.nil?
+  hash_paras, array_paras = get_no_option_paras!(ARGV, json_path, yaml_path)
+  
+  index = array_paras[0] unless array_paras.empty?
+  raise 'please input query index'                   if index.nil?
+  hash_paras['os_project'] = array_paras[1] unless array_paras.length == 1
+  request_info = {
+    'index' => index,
+    'query' => {
+      'size' => size,
+      'query' => {}
+    }
+  }
+  if field_paras
+    request_info['query']['_source'] = field_paras
+  end
+  if sort_paras
+    request_info['query']['sort'] = sort_paras
+  end
+  hash_paras['to_delete'] = false if index == 'projects'
+  must_body = []
+  hash_paras.each do |k, v|
+    if v && v.include?(',')
+      must_body.append({'terms' => {k => v.split(',')}})
+      next
+    end
+    must_body.append({'term' =>  {k => v}})
+  end
+  request_info['query']['query'] = {'constant_score' => {'filter' => {'bool' => {'must' => must_body}}}}
+  jwt = load_jwt?
+  config = load_my_config
+  api_client = CcbApiClient.new(config['GATEWAY_IP'], config['GATEWAY_PORT'])
+  response = api_client.search(jwt, request_info.to_json)
+  response = JSON.parse(response)
+  if response.has_key?('status_code') and response['status_code'] == 401
+    jwt = load_jwt?(force_update=true) # jwt may timeout and retry once
+    api_client = CcbApiClient.new(config['GATEWAY_IP'], config['GATEWAY_PORT'])
+    response = api_client.search(jwt, request_info.to_json)
+    response = JSON.parse(response)
+  end
+  check_return_code(response)
+  puts JSON.pretty_generate(response['hits']['hits'])
+end

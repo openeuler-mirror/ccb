@@ -1,0 +1,82 @@
+#! /usr/bin/env ruby
+
+# frozen_string_literal: true
+
+LKP_SRC = ENV['LKP_SRC'] || File.dirname(File.dirname(File.dirname(File.realpath($PROGRAM_NAME))))
+
+require 'json'
+require 'optparse'
+require "#{LKP_SRC}/sbin/cli/ccb_common"
+require "#{LKP_SRC}/sbin/cli/ccb_api_client"
+
+json_path = nil
+yaml_path = nil
+
+options = OptionParser.new do |opts|
+  opts.banner = 'Usage: ccb build-single key1=val1 -j JSON|-y YAML'
+  opts.separator '    eg.1: ccb build-single os_project=openEuler:Mainline packages=gcc -j JSON|-y YAML'
+  opts.separator ''
+
+  opts.on('-j', '--json <path>', 'json file') do |j|
+    json_path = j
+  end
+
+  opts.on('-y', '--yaml <path>', 'yaml file') do |y|
+    yaml_path = y
+  end
+
+  opts.on('-h', '--help', 'show this message') do
+    puts options
+    exit
+  end
+end
+
+options.parse!(ARGV)
+
+if ARGV.empty?
+  puts(options)
+  exit
+end
+
+def build_single_response(os_project, jwt, hash, my_config)
+  ccb_api_client = CcbApiClient.new(my_config['GATEWAY_IP'], my_config['GATEWAY_PORT'])
+  response = ccb_api_client.build_single(jwt, os_project, hash.to_json)
+  response = JSON.parse(response)
+end
+
+def build_single_result(os_project, hash, my_config)
+  jwt = load_jwt?
+  response = build_single_response(os_project, jwt, hash, my_config)
+
+  if response.has_key?('status_code') && (response['status_code'] == 401)
+    # jwt may timeout and retry once
+    jwt = load_jwt?(force_update = true)
+    response = build_single_response(os_project, jwt, hash, my_config)
+  end
+
+  check_return_code(response)
+  puts JSON.pretty_generate response
+end
+
+hash = get_no_option_paras!(ARGV, json_path, yaml_path)[0]
+
+my_config = load_my_config
+os_project = hash['os_project'] || ''
+build_id = hash['build_id'] || ''
+packages = hash['packages'] || ''
+
+if os_project.empty? || packages.empty?
+  puts "Both os_project and packages can't be empty"
+  exit
+end
+
+required_keys = %w[GATEWAY_IP GATEWAY_PORT]
+
+required_keys.each do |var|
+  unless my_config.has_key?(var) && !my_config[var].nil?
+    puts "config #{var} not found"
+    exit
+  end
+end
+
+build_single_result(os_project, hash, my_config)

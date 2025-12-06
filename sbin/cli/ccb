@@ -1,0 +1,36 @@
+#!/bin/sh
+SCRIPT_DIR=$(dirname $(realpath $0))
+PROJECT_DIR=$(dirname $(dirname $SCRIPT_DIR))
+
+ruby -v >/dev/null 2>&1
+if [ "$?" = 0 ]; then
+	exec $PROJECT_DIR/sbin/cli/ccb.rb "$@"
+fi
+usage()
+{
+	cat <<-EOF
+	Usage: ccb command [option]
+	command:
+	select           Query ES. Usage: ccb select <index> k=v|--json JSON|--yaml YAML --sort --field. Details see 'ccb select -h'.
+	create           Create project/snapshot. Usage: ccb create <index> <os_project> k=v|--json JSON|--yaml YAML. Details see 'ccb create -h'.
+	update           Update project. Usage: ccb update <index> <os_project> k=v|--json JSON|--yaml YAML. Details see 'ccb update -h'.
+	download         Download rpms. Usage: ccb download k=v --sub --debuginfo --source. Details see 'ccb download -h'.
+	build-single     Build single package. Usage: ccb build-single k=v|--json JSON|--yaml YAML. Details see 'ccb build-single -h'.
+	log              Search job result log url. Usage: ccb log <job_id>. Details see 'ccb log -h'.
+	build            Build dag(full or incremental) packages. Usage: ccb build k=v|--json JSON|--yaml YAML. Details see 'ccb build -h'.
+	cancel           cancel build task. Usage: ccb cancel <build_id>.  Details see 'ccb cancel -h'.
+	ls               Display rpm packet information. Details see 'ccb ls -h'.
+	query		 Display rpms query information. Details see 'ccb query -h'.
+	local-build	 Build package locally. Details see 'ccb local-build -h or ccb lb -h'.
+	local-rebuild	 Rebuild job locally. Details see 'ccb local-rebuild -h or ccb lr -h'.
+	EOF
+	exit
+}
+
+if [ "$#" = 0 ]; then
+      usage
+fi
+
+command=$1
+shift
+exec $PROJECT_DIR/sbin/cli/$command "$@"

@@ -1,0 +1,275 @@
+#! /usr/bin/env ruby
+
+# frozen_string_literal: true
+
+LKP_SRC = ENV['LKP_SRC'] || File.dirname(File.dirname(File.dirname(File.realpath($PROGRAM_NAME))))
+
+require 'json'
+require 'optparse'
+require 'rbconfig'
+require 'fileutils'
+require "#{LKP_SRC}/sbin/cli/ccb_common"
+require "#{LKP_SRC}/sbin/cli/ccb_api_client"
+
+dailybuild_hash = {"local" => "http://172.16.1.236:31744",
+                   "remote" => "http://121.36.84.172"}
+show_docker = false
+config_hash = {}
+
+options = OptionParser.new do |opts|
+  opts.banner = 'Usage: ccb local-rebuild key=val [options]'
+  opts.separator ''
+
+  opts.separator '    eg.1: ccb local-rebuild job_id=cbs.001 --showdocker'
+  opts.separator '    eg.1: ccb lr job_id=cbs.001 --showdocker'
+  opts.separator ''
+  opts.separator 'options:'
+
+  opts.on('--showdocker', 'show container info') do
+    show_docker = true
+  end
+
+  opts.on('-h', '--help', 'show this message') do
+    puts options
+    exit
+  end
+end
+
+begin
+  options.parse!(ARGV)
+rescue => e
+  puts options
+  puts "\n#{e.message}"
+  exit
+end
+
+if ARGV.empty?
+  puts(options)
+  exit
+end
+
+begin
+  ARGV.each do |arg|
+    value = ""
+    info = arg.split('=', 2)
+    key = info[0]
+    value = info[1] || ''
+    if key == "job_id"
+      if value.length == 0
+        puts options
+        puts "\n[ERROR] The parameter: #{key} requires a value"
+        exit
+      else
+        config_hash[key] = value.strip
+      end
+    else
+      puts options
+      exit
+    end
+  rescue => e
+    puts options
+    puts "\n#{e.message}"
+    exit
+  end
+end
+
+
+def get_response(jwt, hash, my_config)
+  ccb_api_client = CcbApiClient.new(my_config['GATEWAY_IP'], my_config['GATEWAY_PORT'])
+  response = ccb_api_client.search(jwt, hash)
+  response = JSON.parse(response)
+  check_return_code(response)
+  response
+end
+
+def search_jobs_info(job_id, my_config)
+  query = {"index": 'jobs',
+           "query": {
+             "size": 1,
+             "query": {"bool": {"must": ["term": {"_id": job_id}]}}
+           }}
+  jwt = load_jwt?(force_update = true)
+  response = get_response(jwt, query.to_json, my_config)
+  source = response['hits']['hits'][0]
+  if source.nil?
+    puts "[ERROR] Not found the job id: #{job_id}"
+    exit
+  end
+  source['_source']
+end
+
+def parse_repo_addr(job_info, config_hash, dailybuild_hash)
+  repo_url = ""
+  if job_info.has_key?("external_mount_repo_addr")
+    repo_url = job_info["external_mount_repo_addr"]
+  end
+
+  if repo_url.length == 0
+    if job_info.has_key?("mount_repo_addr")
+      repo_prefix = "#{config_hash['repo_prefix']}/api/#{job_info['emsx']}/repositories"
+      job_info['mount_repo_addr'].split().each do |url|
+        tmp_repo = url.gsub(/http:\/\/192\.168\.\d+\.\d+\:\d+\/repositories/, repo_prefix)
+        new_repo = tmp_repo.gsub(dailybuild_hash["local"], dailybuild_hash["remote"])
+        repo_url = repo_url + " " + new_repo
+      end
+    end
+  end
+
+  if repo_url.length == 0
+    puts "[ERROR] Not found some repo, job id: #{job_info['id']}"
+    exit
+  else
+    config_hash["mount_repo_name"] = job_info["mount_repo_name"]
+    config_hash["mount_repo_priority"] = job_info["mount_repo_priority"]
+    config_hash["mount_repo_addr"] = repo_url
+  end
+end
+
+def modify_config_hash(job_info, config_hash)
+  tmp_array = ["os_variant", "emsx", "arch", "build_type", "package", "spec_name", 
+               "spec_branch", "upstream_commit", "macros", "skip_check", "preinstall", 
+               "prefer", "disable_check_path", "use_root", "use_xz", "use_kmod_libs", 
+               "snapshot_id"
+  ]
+  tmp_array.each do |name|
+    if job_info.has_key?(name)
+      if name == "macros"
+        config_hash[name] = job_info[name].tr("\n", ",") || ''
+      elsif name == "emsx"
+        config_hash[name] = job_info[name] || 'ems1'
+      elsif name == "spec_name"
+        config_hash[name] = "#{job_info[name]}.spec"
+      else
+        config_hash[name] = job_info[name] || ''
+      end
+    end
+  end
+
+  config_hash['LKP_SRC'] = "/lkp-tests"
+  config_hash['output_dir'] = "/tmp/#{config_hash['job_id']}"
+  config_hash['config_file_path'] = "#{config_hash['output_dir']}/.project_config"
+  if config_hash["build_type"] == "makehotpatch"
+    config_hash["build_user"] = "root"
+    config_hash["run_shell"] = "local-hotpatch"
+    config_hash["issue_title"] = job_info["issue_title"]
+    config_hash["issue_date"] = job_info["issue_date"]
+    config_hash["pr_merge_reference_name"] = job_info["pr_merge_reference_name"]
+    config_hash["install_depend_packages_all"] = job_info["install_depend_packages_all"]
+    config_hash["spec_url"] = "https://gitee.com/openeuler/#{config_hash['package']}"
+  else
+    if config_hash.has_key?("use_root")
+      config_hash["build_user"] = "root"
+    else
+      config_hash['build_user'] = "lkp"
+    end
+    config_hash["run_shell"] = "local-rpmbuild"
+    config_hash["spec_url"] = "https://gitee.com/src-openeuler/#{config_hash['package']}"
+  end
+end
+
+def write_config_file(config_hash)
+  %x(rm -rf #{config_hash['output_dir']} && mkdir -p #{config_hash['output_dir']})
+  File.open(config_hash["config_file_path"], "w") do |file|
+    config_hash.each do |key, value|
+      file.write("export #{key}=\"#{value}\"\n")
+    end
+  end
+end
+
+def download_docker_image(config_hash, dailybuild_hash)
+  image_id = nil
+  image_name = "openEuler-docker.#{config_hash['env_arch']}.tar.xz"
+  os_variant = config_hash['os_variant']
+  branch = os_variant.gsub(":", "-")
+  image_url = "#{dailybuild_hash['remote']}/EulerMaker/#{branch}/docker_img/#{config_hash['env_arch']}/#{image_name}"
+  puts "[INFO] Download docker image, please wait"
+  %x(wget #{image_url} -P #{config_hash['output_dir']} -q --show-progress)
+  image_id=%x(docker load -i #{config_hash['output_dir']}/#{image_name} | awk -F':' '{print $NF}')
+  %x(rm -f #{config_hash['output_dir']}/#{image_name})
+  if image_id.empty?
+    puts "[ERROR] Docker load failed"
+    exit
+  end
+  image_id
+end
+
+def rebuild_job_id(image_id, show_docker, config_hash)
+  container_name = "rebuild-#{config_hash["job_id"]}"
+  %x(docker rm -f #{container_name} &>/dev/null)
+  system("docker run -itd --net=host --privileged=true --name #{container_name} #{image_id} /bin/bash -c 'exit'")
+  exec_result=$?.exitstatus
+  if exec_result != 0
+    puts "[ERROR] Run a container failed"
+    exit
+  end
+  config_hash["container_name"] = container_name
+  container_id = %x(docker ps -qf"name=#{config_hash['container_name']}")
+  config_hash["container_id"] = container_id
+  %x(docker cp #{LKP_SRC} #{container_name}:/lkp-tests)
+  %x(docker cp #{config_hash["config_file_path"]} #{container_name}:/tmp/)
+  system("docker exec -it #{container_name} /bin/bash -c 'source /tmp/.project_config;bash /lkp-tests/lib/#{config_hash['run_shell']} 2>&1 | tee /build.log'")
+  %x(docker cp #{container_name}:/build.log #{config_hash["output_dir"]})
+  %x(docker cp #{container_name}:/tmp/.build_failed #{config_hash["output_dir"]} 2>/dev/null)
+  if File.exist?("#{config_hash['output_dir']}/.build_failed")
+    puts "[ERROR] Build failed"
+    if show_docker
+      puts "[INFO] Container name: #{config_hash['container_name']}"
+      puts "[INFO] Container id: #{config_hash["container_id"]}"
+    end
+    exit
+  else
+    puts "[INFO] Build success"
+  end
+end
+
+def save_product_file(config_hash, show_docker)
+  if config_hash["build_type"] == "makehotpatch"
+    %x(docker cp #{config_hash['container_name']}:/hotpatch_cicd/hotpatch_dir #{config_hash["output_dir"]}/#{config_hash["env_arch"]})
+    %x(docker cp #{config_hash['container_name']}:/hotpatch_cicd/hotpatch_src_dir #{config_hash["output_dir"]}/source)
+  else
+    if config_hash["build_user"] == "root"
+      rpmbuild_dir = "/root/rpmbuild"
+    else
+      rpmbuild_dir = "/home/lkp/rpmbuild"
+    end
+    %x(docker cp #{config_hash['container_name']}:#{rpmbuild_dir}/SRPMS #{config_hash["output_dir"]})
+    %x(docker cp #{config_hash['container_name']}:#{rpmbuild_dir}/RPMS #{config_hash["output_dir"]})
+  end
+  puts "[INFO] Output dir: #{config_hash["output_dir"]}"
+  if show_docker
+    puts "[INFO] Container name: #{config_hash['container_name']}"
+    puts "[INFO] Container id: #{config_hash["container_id"]}"
+  end
+end
+
+
+job_id = config_hash['job_id'] || ''
+if job_id.empty?
+  puts options
+  puts "\n[ERROR] Empty is not allowed for argument: job_id"
+  exit
+end
+
+my_config = load_my_config
+env_arch = RbConfig::CONFIG['arch'].split('-')[0]
+config_hash["env_arch"] = env_arch
+
+if my_config.has_key?("SRV_URL")
+  config_hash['repo_prefix'] = my_config['SRV_URL']
+else
+  puts "[ERROR] Please add the SRV_URL configuration item to the #{ENV['HOME']}/.config/cli/defaults/config.yaml config file"
+  exit
+end
+
+job_info = search_jobs_info(job_id, my_config)
+if job_info["arch"] != env_arch
+  puts "[ERROR] Local env architecture is #{env_arch}, job id architecture is #{job_info['arch']}"
+  exit
+end
+
+modify_config_hash(job_info, config_hash)
+parse_repo_addr(job_info, config_hash, dailybuild_hash)
+write_config_file(config_hash)
+image_id = download_docker_image(config_hash, dailybuild_hash)
+rebuild_job_id(image_id, show_docker, config_hash)
+save_product_file(config_hash, show_docker)

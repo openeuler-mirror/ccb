@@ -1,0 +1,303 @@
+#! /usr/bin/env ruby
+
+# frozen_string_literal: true
+
+LKP_SRC = ENV['LKP_SRC'] || File.dirname(File.dirname(File.dirname(File.realpath($PROGRAM_NAME))))
+
+require 'json'
+require 'optparse'
+require 'fileutils'
+require "#{LKP_SRC}/sbin/cli/ccb_common"
+require "#{LKP_SRC}/sbin/cli/ccb_api_client"
+
+opt_set_key_value = {}
+download_all = true
+download_subrpm = false
+download_debugrpm = false
+download_sourcerpm = false
+sub_rpms = []
+
+options = OptionParser.new do |opts|
+  opts.banner = 'Usage: ccb download [options] key1=val1 key2=val2...'
+  opts.separator '        download rpms except sub, debuginfo, debugsource and source rpms by default'
+  opts.separator ''
+
+  opts.separator '    eg.1: ccb download os_project=openEuler:Mainline packages=gcc architecture=aarch64 -b all -s -d'
+  opts.separator '    eg.2: ccb download snapshot_id=123456 packages=gcc architecture=aarch64 dest=/home/zs/rpms'
+  opts.separator ''
+  opts.separator 'options:'
+
+  opts.on('-b', '--sub KEYWORD', 'download with sub rpms, sub KEYWORK: all|rpm1|rpm1,rpm2|...') do |rpm|
+    if rpm.start_with?('-') || rpm.match?('=')
+      puts 'missing argument: -b (Specify at least one sub rpm name or use all instead!)'
+      exit
+    end
+
+    download_all = false
+    download_subrpm = true
+    sub_rpms += rpm.split(',') unless rpm.eql? 'all'
+  end
+
+  opts.on('-d', '--debuginfo', 'download with debuginfo and debugsource rpms') do
+    download_all = false
+    download_debugrpm = true
+  end
+
+  opts.on('-s', '--source', 'download with source rpms') do
+    download_all = false
+    download_sourcerpm = true
+  end
+
+  opts.on('-h', '--help', 'show this message') do
+    puts options
+    exit
+  end
+end
+
+options.parse!(ARGV)
+
+if ARGV.empty?
+  puts(options)
+  exit
+end
+
+ARGV.each do |arg|
+  k, v = arg.split('=', 2)
+  opt_set_key_value[k] = v.strip
+end
+
+def rpms_query_by_field(field, architecture, packages, os_variant, spec_name)
+  bool = { "must": [{ "term": field }, { "term": { "architecture": architecture } }, { "term": { "repo_name": packages } }, { "term": { "spec_name": spec_name } }] }
+  unless os_variant.empty?
+    bool[:must].push({ "term": { "os_variant": os_variant } })
+  end
+
+  query = { "index": 'rpms',
+            "query": {
+              "size": 1,
+              "_source": %w[os_variant os_project rpms_detail rpm_path],
+              "query": { "bool": bool },
+              "sort": [{ 'submit_time' => { "order": 'desc' } }]
+            } }
+  return query
+end
+
+def rpms_query_by_aggregation(field, architecture, repo_name, os_variant)
+  bool = { "must": [{ "term": field }, { "term": { "architecture": architecture } }, { "term": { "repo_name": repo_name } }] }
+
+  unless os_variant.empty?
+    bool[:must].push({ "term": { "os_variant": os_variant } })
+  end
+
+  query = { "index": 'rpms',
+            "query": {
+              "query": { "bool": bool },
+              "_source": %w[os_variant os_project rpms_detail rpm_path],
+              "size": 0,
+              "aggs": {
+                "group_by_spec_name": {
+                  "terms": { "field": 'spec_name' },
+                  "aggs": {
+                    "doc_top_1": {
+                      "top_hits": {
+                        "size": 1,
+                        "_source": %w[os_variant os_project rpms_detail rpm_path],
+                        "sort": [{ 'submit_time' => { "order": 'desc' } }]
+                      }
+                    }
+                  }
+                }
+              }
+            } }
+  return query
+end
+
+def get_rpms_response(jwt, hash, my_config)
+  ccb_api_client = CcbApiClient.new(my_config['GATEWAY_IP'], my_config['GATEWAY_PORT'])
+  response = ccb_api_client.search(jwt, hash)
+  JSON.parse(response)
+end
+
+def get_rpms(jwt, field, architecture, repo_name, my_config, os_variant, spec_name)
+  hash = rpms_query_by_field(field, architecture, repo_name, os_variant, spec_name).to_json
+  response = get_rpms_response(jwt, hash, my_config)
+
+  if response.has_key?('status_code') && (response['status_code'] == 401)
+    # jwt may timeout and retry once
+    jwt = load_jwt?(force_update = true)
+    response = latest_rpms_response(jwt, hash, my_config)
+  end
+
+  source = response['hits']['hits'][0]
+  if source.nil?
+    puts 'Not found any rpms'
+    exit
+  end
+  rpms = source['_source']['rpms_detail'].keys
+  os_variant = source['_source']['os_variant']
+  os_project = source['_source']['os_project']
+  rpm_path = source['_source']['rpm_path']
+
+  return rpms, os_variant, os_project, rpm_path
+end
+
+def get_rpms_by_aggregation(jwt, field, architecture, repo_name, my_config, os_variant)
+  hash = rpms_query_by_aggregation(field, architecture, repo_name, os_variant).to_json
+  response = get_rpms_response(jwt, hash, my_config)
+
+  if response.has_key?('status_code') && (response['status_code'] == 401)
+    # jwt may timeout and retry once
+    jwt = load_jwt?(force_update = true)
+    response = latest_rpms_response(jwt, hash, my_config)
+  end
+
+  buckets_list = response['aggregations']['group_by_spec_name']['buckets']
+  if buckets_list[0].nil?
+    puts 'Not found any rpms'
+    exit
+  end
+  rpms = []
+  buckets_list.each do |bucket|
+    rpms += bucket['doc_top_1']['hits']['hits'][0]['_source']['rpms_detail'].keys
+  end
+
+  first_bucket = buckets_list[0]['doc_top_1']['hits']['hits'][0]['_source']
+  os_variant = first_bucket['os_variant']
+  os_project = first_bucket['os_project']
+  rpm_path = first_bucket['rpm_path']
+
+  return rpms, os_variant, os_project, rpm_path
+end
+
+def get_debugrpm(rpms)
+  debugrpm = rpms.select { |rpm| rpm.match(/-debuginfo-|-debugsource-/) }
+end
+
+def get_srcrpm(rpms)
+  srcrpm = rpms.select { |rpm| rpm.match(/.src.rpm$/) }
+end
+
+def get_subrpm(rpms, debugrpm, srcrpm, sub_rpms)
+  subrpm = []
+  tmp_subrpm = rpms - debugrpm - srcrpm
+  if sub_rpms.empty?
+    subrpm = tmp_subrpm
+  else
+    sub_rpms.each do |sub_rpm|
+      subrpm += tmp_subrpm.select { |rpm| rpm.match "^#{sub_rpm}" }
+    end
+  end
+  subrpm
+end
+
+def filter_rpms(download_all, download_subrpm, sub_rpms, download_debugrpm, download_sourcerpm, packages, rpms, src)
+  rpms_list = []
+
+  if download_all
+    rpms_list = rpms
+    return rpms_list
+  end
+  debugrpm = get_debugrpm(rpms)
+  srcrpm = get_srcrpm(rpms)
+  subrpm = get_subrpm(rpms, debugrpm, srcrpm, sub_rpms)
+
+  rpms_list += debugrpm if download_debugrpm
+  rpms_list += srcrpm if download_sourcerpm
+  rpms_list += subrpm if download_subrpm
+
+  rpms_list
+end
+
+def download_rpms(dest, unit_dir, src, rpms_list)
+  dest = File.join(dest, unit_dir)
+  FileUtils.mkdir_p(dest) unless File.directory? dest
+  puts "\nDownloading rpms to: #{dest}\n"
+  rpms_list.each do |rpm|
+    puts "\t- #{rpm}"
+    %x(wget -q -O "#{dest}/#{rpm}" "#{src}/#{rpm}")
+
+    next unless File.zero?("#{dest}/#{rpm}")
+
+    FileUtils.rm_rf(dest)
+    puts "Download failed for rpm: #{src}/#{rpm}"
+    exit
+  end
+  puts "\n"
+end
+
+def get_emsx(os_project, my_config)
+  query = {"index": 'projects',
+           "query": {
+             "size": 1,
+             "_source": ["emsx"],
+             "query": {"bool": {"must": ["term": {"os_project": os_project}]}}
+           }}
+  jwt = load_jwt?(force_update = true)
+  ccb_api_client = CcbApiClient.new(my_config['GATEWAY_IP'], my_config['GATEWAY_PORT'])
+  response = ccb_api_client.search(jwt, query.to_json)
+  response = JSON.parse(response)
+  source = response['hits']['hits'][0]
+  if source.nil?
+    puts "Not found the porject: #{os_project}"
+    exit
+  end
+  source['_source']['emsx'] || 'ems1'
+end
+
+dest = opt_set_key_value['dest'] || './'
+os_project = opt_set_key_value['os_project'] || ''
+packages = opt_set_key_value['packages'] || ''
+snapshot_id = opt_set_key_value['snapshot_id'] || ''
+architecture = opt_set_key_value['architecture'] || ''
+os_variant = opt_set_key_value['os_variant'] || ''
+
+if snapshot_id.empty? && os_project.empty?
+  puts 'Both empty are not allowed for argument: snapshot_id, os_project'
+  exit
+end
+
+if architecture.empty? || packages.empty?
+  puts 'A least one of the below variable is empty, please input value to the variable'
+  puts "architecture=#{architecture}\npackages=#{packages}"
+  exit
+end
+
+repo_name, spec_name = opt_set_key_value['packages'].split(':')
+if snapshot_id.empty?
+  field = { 'os_project' => os_project }
+  unit_dir = os_project + '-' + architecture + '-' + packages
+else
+  field = { 'snapshot_id' => snapshot_id }
+  unit_dir = snapshot_id + '-' + architecture + '-' + packages
+end
+
+my_config = load_my_config
+jwt = load_jwt?
+
+required_keys = %w[GATEWAY_IP GATEWAY_PORT SRV_HTTP_REPOSITORIES_PROTOCOL SRV_HTTP_REPOSITORIES_HOST SRV_HTTP_REPOSITORIES_PORT]
+
+required_keys.each do |var|
+  unless my_config.has_key?(var) && !my_config[var].nil?
+    puts "config #{var} not found"
+    exit
+  end
+end
+
+
+emsx = get_emsx(os_project, my_config)
+rpms, os_variant, os_project, rpm_path = if spec_name.nil?
+           get_rpms_by_aggregation(jwt, field, architecture, repo_name, my_config, os_variant)
+         else
+           get_rpms(jwt, field, architecture, repo_name, my_config, os_variant, spec_name)
+         end
+
+src_prefix = my_config['SRV_HTTP_REPOSITORIES_PROTOCOL'] + my_config['SRV_HTTP_REPOSITORIES_HOST'] + ':' + my_config['SRV_HTTP_REPOSITORIES_PORT'].to_s
+src = src_prefix + "/api/#{emsx}/#{rpm_path}"
+
+rpms_list = filter_rpms(download_all, download_subrpm, sub_rpms, download_debugrpm, download_sourcerpm, packages, rpms, src)
+if rpms_list.empty?
+  puts 'Not found rpms that you want to download'
+  exit
+end
+
+download_rpms(dest, unit_dir, src, rpms_list)

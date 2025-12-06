@@ -1,0 +1,80 @@
+#! /usr/bin/env ruby
+
+# frozen_string_literal: true
+
+LKP_SRC = ENV['LKP_SRC'] || File.dirname(File.dirname(File.dirname(File.realpath($PROGRAM_NAME))))
+
+require 'yaml'
+require 'json'
+require 'optparse'
+require "#{LKP_SRC}/sbin/cli/ccb_common"
+require "#{LKP_SRC}/sbin/cli/ccb_api_client"
+
+json_path = nil
+yaml_path = nil
+
+options = OptionParser.new do |opts|
+  opts.banner = 'Usage: ccb create <index> <os_project> k=v|--json JSON|--yaml YAML'
+  opts.separator '    eg.1: ccb create projects openEuler:Mainline --json config.json'
+  opts.separator '    eg.2: ccb create snapshots openEuler:Mainline'
+  opts.separator 'options:'
+
+  opts.on('-j', '--json <path>', 'json file') do |j|
+    json_path = j
+  end
+  opts.on('-y', '--yaml <path>', 'yaml file') do |y|
+    yaml_path = y
+  end
+
+  opts.on('-h', '--help', 'show this message') do
+    puts options
+    exit
+  end
+end
+
+def execute_update_api!(array_paras, hash_paras, request_info, jwt, inherited_from)
+  config = load_my_config
+  api_client = CcbApiClient.new(config['GATEWAY_IP'], config['GATEWAY_PORT'])
+  if array_paras.length == 2 and array_paras[0] == 'projects' and not inherited_from.nil?
+    sub_project = array_paras[1]
+    response = api_client.create_branch_project(jwt, inherited_from, sub_project, request_info.to_json)
+  elsif array_paras.length == 2 and array_paras[0] == 'projects' and inherited_from.nil?
+    os_project = array_paras[1]
+    response = api_client.create_os_project(jwt,  os_project, request_info.to_json)
+  elsif array_paras.length == 2 and array_paras[0] == 'snapshots'
+    os_project = array_paras[1]
+    response = api_client.create_snapshot(jwt, os_project, request_info.to_json)
+  else
+    puts options
+    exit
+  end
+  response = JSON.parse(response)
+  return response
+end
+
+if $PROGRAM_NAME == __FILE__
+  if ARGV.empty?
+    puts options
+    exit
+  end
+  options.parse!(ARGV)
+
+  hash_paras, array_paras = get_no_option_paras!(ARGV, json_path, yaml_path)
+
+  index = array_paras[0] unless array_paras.empty?
+  raise 'please input create index' if index.nil?
+  request_info = hash_paras
+  inherited_from = nil
+  if request_info.has_key?('inherited_from')
+    inherited_from = request_info['inherited_from']
+    request_info.delete('inherited_from')
+  end
+  jwt = load_jwt?(force_update=true)
+  response = execute_update_api!(array_paras, hash_paras, request_info, jwt, inherited_from)
+  if response.has_key?('status_code') and response['status_code'] == 401
+    jwt = load_jwt?(force_update=true) # jwt may timeout and retry once
+    response = execute_update_api!(array_paras, hash_paras, request_info, jwt, inherited_from)
+  end
+  check_return_code(response)
+  puts JSON.pretty_generate(response)
+end

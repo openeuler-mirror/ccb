@@ -1,0 +1,303 @@
+#!/bin/bash
+# package
+# spec_name
+# spec_url
+# spec_branch
+# macros
+# prefer
+# preinstall
+# mount_repo_name
+# mount_repo_addr
+# mount_repo_priority
+# pr_merge_reference_name
+
+. $LKP_SRC/lib/rpm.sh
+
+if [ ! -n "$mount_repo_addr" ] || [ ! -n "$spec_url" ] || [ ! -n "$spec_branch" ] || [  ! -n "$package" ] || [ ! -n "$spec_name" ] || [ ! -n "$pr_merge_reference_name" ];then
+	echo "some params is not exists"
+	exit 99
+fi
+
+
+die()
+{
+	echo "$@" && exit 99
+}
+
+program_exit_exception()
+{
+	touch /tmp/.build_failed
+	if [ "$status" == "success" ];then
+		rm -f /tmp/.build_failed
+	fi
+}
+
+git_clone()
+{
+	for i in {1..6}
+	do
+		if [[ "${i}" -gt 1 ]];then
+			sleep 3
+		fi
+		git clone ${1} -b ${2} --depth=1 2>/dev/null || continue
+		return 0
+	done
+	return 1
+}
+
+init_hotpatch_workspace()
+{
+	root_path=/hotpatch_pr
+	mkdir -p ${root_path}
+
+	hotpatch_cicd=/hotpatch_cicd
+	patch_dir=${hotpatch_cicd}/patch_dir
+	hotpatch_dir=${hotpatch_cicd}/hotpatch_dir
+	update_info_file=${hotpatch_cicd}/update_info
+	updateinfo_path=${hotpatch_cicd}/updateinfo_path
+	hotpatch_src_dir=${hotpatch_cicd}/hotpatch_src_dir
+	metadata_path=${hotpatch_cicd}/hot-patch_metadata
+	updateinfo_src_path=${hotpatch_cicd}/updateinfo_src_path
+
+	mkdir -p ${patch_dir} ${hotpatch_dir} ${hotpatch_src_dir}
+}
+
+config_macros()
+{
+	local rpmmacros_files="/root/.rpmmacros"
+	if [ -n "$disable_check_path" ];then
+		if [ -f "$file" ];then
+			sed -i '/check-rpaths/ s/^/#/' "${rpmmacros_files}"
+		fi
+	fi
+
+	IFS=',' read -ra my_array <<< "$macros"
+	for line in "${my_array[@]}"
+	do
+		echo "${line}" >> "${rpmmacros_files}"
+	done
+}
+
+config_maven_mirror()
+{
+	local m2="/root/.m2"
+	mkdir -p "$m2"/repository
+	cat > "$m2"/settings.xml <<-EOF
+	<settings>
+		<localRepository>${m2}/repository</localRepository>
+		<mirrors>
+			<mirror>
+				<id>huaweicloud</id>
+				<name>huaweicloud</name>
+				<mirrorOf>*</mirrorOf>
+				<url>https://repo.huaweicloud.com/repository/maven/</url>
+			</mirror>
+		</mirrors>
+	</settings>
+	EOF
+	chmod 777 -R "$m2"
+}
+
+create_build_command()
+{
+	if [ -n "${repo_name}" ];then
+		echo "${repo_name}.spec" > /.build.command
+		chmod 775 /.build.command
+	fi
+}
+
+install_gcc_secure()
+{
+	yum install -y gcc_secure || die "install gcc_secure failed"
+}
+
+install_pre_rpm()
+{
+	yum install -y glibc-all-langpacks glibc-locale-archive || die "install pre rpm failed"
+
+	if [ -n "${preinstall}" ];then
+		yum install -y ${preinstall[@]} || die "install ${preinstall[@]} failed"
+	fi
+	
+	if [ -n "${prefer}" ];then
+		yum install -y ${prefer[@]} || die "install ${prefer[@]} failed"
+	fi
+}
+
+install_depend_rpm()
+{
+	if [ -n "${install_depend_packages_all}" ];then
+		yum install -y ${install_depend_packages_all[@]} || die "install ${install_depend_packages_all[@]} failed"
+	fi
+}
+
+sync_system_rpms()
+{
+	if [[ "${mount_repo_name}" =~ "lastest_repo" ]];then
+		dnf distro-sync -y --allowerasing --repo 0
+	fi
+	rm -rf /etc/yum.repos.d/openEuler.repo
+}
+
+modify_etc_profile()
+{
+	echo "export TERM=xterm-256color" >> /etc/profile
+	echo "export TZ=Asia/Shanghai" >> /etc/profile
+	source /etc/profile
+}
+
+set_project_config()
+{
+	config_macros
+	config_maven_mirror
+	create_build_command
+	install_gcc_secure
+	install_pre_rpm
+	install_depend_rpm
+	sync_system_rpms
+	modify_etc_profile
+}
+
+download_code_repo()
+{
+	git config --global http.lowSpeedLimit 0
+	git config --global http.lowSpeedTime 3600
+	git config --global lfs.activitytimeout 3600
+
+	git_clone "${spec_url}" "${spec_branch}" || die "git clone failed, url: ${spec_url}"
+
+	metadata_path="/${package}"
+	cd "${metadata_path}"
+	local pr_id=$(echo ${pr_merge_reference_name} | awk '{split($0,a,"/");print a[3]}')
+	local lpr="pr_${pr_id}"
+	
+	git fetch -q origin "pull/${pr_id}/head:${lpr}"
+	git checkout -q "${lpr}" || die "checkout git repo ${package} to ${lpr} failed"
+
+}
+
+parse_path_info()
+{
+	cd "${metadata_path}"
+	mode=$(echo $(git diff --name-status HEAD~1 HEAD~0) | sed 's/.*hotmetadata_\([^/]*\)\.xml.*/\1/')
+	patch_path=$(git diff --name-status HEAD~1 HEAD~0 | grep "\.patch" | head -n 1 | awk -F ' ' '{print $2}')
+	hotmetadata_path=$(git diff --name-status HEAD~1 HEAD~0 | grep "hotmetadata_${mode}.xml" | awk -F ' ' '{print $2}')
+
+	if [[ ${hotmetadata_path} && ! ${patch_path} ]]; then
+		repo_path=${hotmetadata_path%/*}/patch
+	fi
+	if [[ !${hotmetadata_path} && ${patch_path} ]]; then
+		repo_path=${patch_path%/*}
+		hotmetadata_path=${repo_path%/*}/hotmetadata_${mode}.xml
+	fi
+
+	repo_path=${metadata_path}/${repo_path}
+	hotmetadata_xml=${metadata_path}/${hotmetadata_path}
+	repo_name=$(echo ${hotmetadata_path} | awk -F '/' '{print $2}')
+	comment_branch=$(echo ${hotmetadata_path} | awk -F '/' '{print $1}')
+}
+
+parse_update_params()
+{
+	local update_info_file=/tmp/update_info
+	local mode_xml="./$(git diff --name-status HEAD~1 HEAD~0 | grep hotmetadata_ | awk '{print $NF}')"
+	[ -z "$mode_xml" ] && die "find hotmetadata_${mode}.xml failed in $(pwd)"
+
+	python3 ${LKP_SRC}/lib/create_hotpatch_update_info.py -i ${mode_xml} -o ${update_info_file} -m ${mode}
+	[ -f "$update_info_file" ] || die "create update info file error, mode_xml: ${mode_xml}."
+
+	cve_type=$(cat ${update_info_file} | grep cve_type: | sed 's/^.*cve_type: //g')
+	issue_id=$(cat ${update_info_file} | grep issue_id: | sed 's/^.*issue_id: //g')
+	patch_name=$(cat ${update_info_file} | grep patch_name: | sed 's/^.*patch_name: //g')
+	curr_version=$(cat ${update_info_file} | grep curr_version: | sed 's/^.*curr_version: //g')
+	curr_release=$(cat ${update_info_file} | grep curr_release: | sed 's/^.*curr_release: //g')
+	reference_id=$(cat ${update_info_file} | grep reference-id: | sed 's/^.*reference-id: //g')
+	reference_href=$(cat ${update_info_file} | grep reference-href: | sed 's/^.*reference-href: //g')
+	reference_type=$(cat ${update_info_file} | grep reference-type: | sed 's/^.*reference-type: //g')
+	hotpatch=$(cat ${update_info_file} | grep patch: | sed 's/^.*patch: //g')
+
+	mkdir ${hotpatch}
+	all_patch=""
+	for patch in ${hotpatch//,/ }
+	do
+		cp $repo_path/$patch ${patch_dir}
+		all_patch="$all_patch ${patch_dir}/$patch"
+	done
+
+}
+
+download_rpms()
+{
+	cd ${root_path} || die "there is no root_path: ${root_path}"
+	src_rpm_url=$(cat ${hotmetadata_xml} | grep SRC_RPM | sed 's/^.*<SRC_RPM>//g' | sed 's/<\/SRC_RPM>.*$//g'| awk -F " " '{print $NR}')
+	wget -q ${src_rpm_url} -P ${root_path} || die "wget src rpm url failed: ${src_rpm_url}"
+	if [[ $env_arch == "x86_64" ]]; then
+		debug_url=$(cat ${hotmetadata_xml} | grep Debug_RPM_X86_64 | sed 's/^.*<Debug_RPM_X86_64>//g' |	sed 's/<\/Debug_RPM_X86_64>.*$//g'|awk -F " " '{print $NR}')
+	elif [[ $env_arch == "aarch64" ]]; then
+		debug_url=$(cat ${hotmetadata_xml} | grep Debug_RPM_Aarch64 | sed 's/^.*<Debug_RPM_Aarch64>//g' | sed 's/<\/Debug_RPM_Aarch64>.*$//g'|awk -F " " '{print $NR}')
+	fi
+	wget -q ${debug_url} -P ${root_path} || die "wget debug url failed: ${debug_url}"
+}
+
+yum_build_dep()
+{
+	rpm -ivh ${source_file}
+	yum-builddep -y /root/rpmbuild/SPECS/*.spec 2>&1 || die "failed to solve dependencies"
+}
+
+syscare_build()
+{
+	source_file=${src_rpm_url##*/}
+	debug_file=${debug_url##*/}
+
+	yum_build_dep
+
+	if [[ $mode == "ACC" ]]; then
+		patch_name="ACC"
+	else
+		patch_name=`echo ${patch_name} | sed 's/-/_/g'`
+	fi
+	syscare build --jobs 8 --patch-name ${patch_name} --patch-version ${curr_version} --patch-release ${curr_release} \
+		--source ${source_file} --debuginfo ${debug_file} --output ${hotpatch_dir} ${all_patch} || die "syscare build error"
+
+	hotpatch_src_filename=$(ls ${hotpatch_dir}/*.src.rpm)
+	mv ${hotpatch_src_filename} ${hotpatch_src_dir}
+}
+
+generate_updateinfo()
+{
+	hotpatch_file=$(ls ${hotpatch_dir}/patch*.rpm)
+	updateinfo_path=${hotpatch_file%.*}.xml
+
+	gen-updateinfo ${cve_type} "${issue_title}" ${issue_id} --reference-type ${reference_type} --reference-id ${reference_id} \
+		--reference-href ${reference_href} --issued-date ${issue_date} --package-dir ${hotpatch_dir} --output-path ${updateinfo_path}
+
+	if [[ "${env_arch}" == "x86_64" ]]; then
+		updateinfo_src_path=${hotpatch_src_filename%.*}.xml
+		gen-updateinfo ${cve_type} "${issue_title}" ${issue_id} --reference-type ${reference_type} --reference-id ${reference_id} \
+		--reference-href ${reference_href} --issued-date ${issue_date} --package-dir ${hotpatch_src_dir} --output-path ${updateinfo_src_path}
+	fi
+}
+
+
+make_hotpatch()
+{
+	add_repo
+	init_hotpatch_workspace
+	download_code_repo
+	parse_path_info
+	parse_update_params
+	set_project_config
+	download_rpms
+	syscare_build
+	generate_updateinfo
+}
+
+trap program_exit_exception EXIT
+
+make_hotpatch
+if [ $? -ne 0 ];then
+	die "build hotpatch failed"
+else
+	status="success"
+fi

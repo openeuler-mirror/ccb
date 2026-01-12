@@ -173,42 +173,22 @@ def get_jwt_from_remote(status, config)
   else
     config['ACCOUNT'] ||= ENV['ACCOUNT'].strip
     config['PASSWORD'] ||= ENV['PASSWORD'].strip
-    config['OAUTH_TOKEN_URL'] ||= ENV['OAUTH_TOKEN_URL'].strip
-    config['OAUTH_REDIRECT_URL'] ||= ENV['OAUTH_REDIRECT_URL'].strip
     config['PUBLIC_KEY_URL'] ||= ENV['PUBLIC_KEY_URL'].strip
     password = encrypt_password(config['PASSWORD'], config['PUBLIC_KEY_URL'])
     api_client = CcbApiClient.new(config['GATEWAY_IP'], config['GATEWAY_PORT'])
-    response = api_client.get_client_info
-    response = JSON.parse(response)
-    client_id = response['client_id'].strip
-    client_secret = response['client_secret'].strip
-    out_str = %x(curl -s -X POST --data-urlencode "grant_type=password" \
---data-urlencode "account=#{config['ACCOUNT']}" --data-urlencode "password=#{password}" \
---data-urlencode "client_id=#{client_id}" --data-urlencode "client_secret=#{client_secret}" \
---data-urlencode "redirect_uri=#{config['OAUTH_REDIRECT_URL']}" "#{config['OAUTH_TOKEN_URL']}")
-    out_hash = JSON.parse(out_str)
-    if out_hash.has_key?('error')
-      puts "get access token failed"
-      access_token = nil
-    else
-      access_token = out_hash['access_token']
-    end
-    if access_token.nil?
-      return nil
-    end
-    api_client = CcbApiClient.new(config['GATEWAY_IP'], config['GATEWAY_PORT'])
-    response = api_client.get_jwt(access_token)
-    response = JSON.parse(response)
+    response = api_client.get_access_token(config['ACCOUNT'], password)
+    body = JSON.parse(response.body)
+    access_token = body['msg']['token']
   end
-  if response.is_a?(Hash) and response.has_key?('token')
+  if access_token
     FileUtils.mkdir_p "#{ENV['HOME']}/.config/cli" unless File.directory? "#{ENV['HOME']}/.config/cli"
     aFile = File.new("#{ENV['HOME']}/.config/cli/jwt", "w+")
     if aFile
-      aFile.syswrite(response['token'])
+      aFile.syswrite(access_token)
     else
       puts 'save jwt faild'
     end
-    return response['token']
+    return access_token
   else
     return nil
   end

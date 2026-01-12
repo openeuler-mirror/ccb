@@ -15,6 +15,7 @@ require "#{LKP_SRC}/sbin/cli/ccb_api_client"
 debug_flag = false
 debug_stage = nil
 clean_flag = false
+local_image = nil
 config_hash = {}
 dailybuild_hash = {"local" => "http://172.16.1.236:31744",
                    "remote" => "http://121.36.84.172"}
@@ -25,6 +26,8 @@ options = OptionParser.new do |opts|
 
   opts.separator '    eg.1: ccb local-build os_project=openEuler:Mainline package=gcc --rm --debug=bp'
   opts.separator '    eg.2: ccb local-build os_project=openEuler:Mainline package=gcc spec=gcc.spec --rm --debug=bp'
+  opts.separator '    eg.3: ccb local-build os_project=openEuler:Mainline package=gcc --local-image openeuler:22.03'
+  opts.separator '    eg.4: ccb local-build os_project=openEuler:Mainline package=gcc arch=riscv64'
   opts.separator ''
   opts.separator 'options:'
 
@@ -35,6 +38,10 @@ options = OptionParser.new do |opts|
   opts.on('--debug [stage]', 'set rpmbuild debug stage, include: bp/bc/bi') do |debug|
     debug_flag = true
     debug_stage = debug
+  end
+
+  opts.on('--local-image IMAGE', 'use existing local docker image (e.g., openeuler:22.03)') do |image|
+    local_image = image
   end
 
   opts.on('-h', '--help', 'show this message') do
@@ -64,8 +71,8 @@ begin
     info = arg.split('=', 2)
     key = info[0]
     value = info[1] || ''
-    if need_keys.include?(key)
-      if value.length == 0
+    if need_keys.include?(key) || key == 'arch'
+      if value.length == 0 && key != 'arch'
         puts options
         puts "\n[ERROR] The parameter: #{key} requires a value"
         exit
@@ -272,7 +279,7 @@ def get_package_data(config_hash, data, flag)
   end
 
   if spec_branch.length == 0 || spec_url.length == 0
-    puts "[ERROR] The gitee url and branch of package: #{config_hash['package']} are not found in the project: #{config_hash['os_project']}"
+    puts "[ERROR] The atomgit url and branch of package: #{config_hash['package']} are not found in the project: #{config_hash['os_project']}"
     exit
   else
     config_hash["spec_url"] = spec_url
@@ -364,7 +371,10 @@ def download_docker_image(config_hash, dailybuild_hash)
   image_url = "#{dailybuild_hash['remote']}/EulerMaker/#{config_hash['branch']}/docker_img/#{config_hash['arch']}/#{image_name}"
   puts "[INFO] Download docker image, please wait"
   %x(wget #{image_url} -P #{config_hash['output_dir']} -q --show-progress)
-  image_id=%x(docker load -i #{config_hash['output_dir']}/#{image_name} | awk -F':' '{print $NF}')
+  load_output = %x(docker load -i #{config_hash['output_dir']}/#{image_name} 2>&1).strip
+  if load_output =~ /Loaded image ID:\s*sha256:([a-f0-9]{64})/i
+    image_id = $1
+  end
   %x(rm -f #{config_hash['output_dir']}/#{image_name})
   if image_id.nil?
     puts "[ERROR] Docker load failed"
@@ -376,7 +386,9 @@ end
 def build_package(image_id, clean_flag, config_hash)
   container_name = "local-build-#{config_hash["package"]}"
   %x(docker rm -f #{container_name} &>/dev/null)
-  system("docker run -itd --net=host --name #{container_name} #{image_id} /bin/bash -c 'exit'")
+  puts "[INFO] Start building arch: #{config_hash["arch"]}"
+  system("docker run -itd --platform=#{config_hash["arch"]} --net=host --name #{container_name} #{image_id} bash")
+
   exec_result=$?.exitstatus
   if exec_result != 0
     puts "[ERROR] Run a container failed"
@@ -415,6 +427,14 @@ def build_package(image_id, clean_flag, config_hash)
   end
 end
 
+def get_build_image(local_image)
+  full_hash = %x(docker inspect #{local_image} --format "{{.Id}}" 2>/dev/null).strip
+  if full_hash.empty?
+    puts "[ERROR] Docker image '#{local_image}' not found locally"
+    exit 1
+  end
+  return full_hash.gsub(/^sha256:/, '')
+end
 
 os_project = config_hash['os_project'] || ''
 package = config_hash['package'] || ''
@@ -455,7 +475,7 @@ else
 end
 
 arch = RbConfig::CONFIG['arch'].split('-')[0]
-config_hash["arch"] = arch
+config_hash["arch"] = config_hash['arch'].nil? || config_hash['arch'].empty? ? arch : config_hash['arch']
 config_hash['LKP_SRC'] = "/lkp-tests"
 config_hash["build_user"] = "lkp"
 config_hash['output_dir'] = "/tmp/#{os_project}/#{package}"
@@ -468,5 +488,9 @@ result = search_builds_info(os_project, arch, my_config)
 projects_info = get_projects_data(os_project, my_config, config_hash)
 repo_array = construct_repo_url(projects_info, config_hash, dailybuild_hash)
 write_config_file(config_hash, repo_array)
-image_id = download_docker_image(config_hash, dailybuild_hash)
+if local_image.nil?
+  image_id = download_docker_image(config_hash, dailybuild_hash)
+else
+  image_id = get_build_image(local_image)
+end
 build_package(image_id, clean_flag, config_hash)

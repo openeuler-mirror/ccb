@@ -9,7 +9,7 @@ This repository serves as a client-side tool for EulerMaker, allowing users to p
 
 #### 安装教程
 
-EulerMaker 将 [lkp-tests](https://gitee.com/openeuler-customization/lkp-tests.git) 作为客户端，通过本地安装 lkp-tests，lkp-tests提交任务依赖ruby，建议安装ruby2.5及以上版本。
+EulerMaker 将 [lkp-tests](https://atomgit.com/openeuler-customization/lkp-tests.git) 作为客户端，通过本地安装 lkp-tests，lkp-tests提交任务依赖ruby，建议安装ruby2.5及以上版本。
 
 安装ccb软件包后需要对本地配置文件配置用户名， 密码、网关等信息：
 
@@ -17,9 +17,9 @@ EulerMaker 将 [lkp-tests](https://gitee.com/openeuler-customization/lkp-tests.g
 - 客户端环境要求：支持x86、arm、龙芯架构的openeuler系统服务器
 
 ```
-  GATEWAY_IP: eulermaker.compass-ci.openeuler.openatom.cn  #网关配置必填
+  GATEWAY_IP: eulermaker.openeuler.openatom.cn  #网关配置必填
   GATEWAY_PORT: 443
-  SRV_HTTP_REPOSITORIES_HOST: eulermaker.compass-ci.openeuler.openatom.cn
+  SRV_HTTP_REPOSITORIES_HOST: eulermaker.openeuler.openatom.cn
   SRV_HTTP_REPOSITORIES_PORT: 443
   SRV_HTTP_REPOSITORIES_PROTOCOL: https://  #仅用于ccb download子命令，若无下载需求，可以不配置
   SRV_HTTP_RESULT_HOST: 443  存储job日志的微服务
@@ -28,7 +28,7 @@ EulerMaker 将 [lkp-tests](https://gitee.com/openeuler-customization/lkp-tests.g
   ACCOUNT: xx  #配置openeuler社区账号，社区账号及密码若不配置只能执行游客可执行的命令
   PASSWORD: xx  #配置openeuler社区账号密码
   OAUTH_TOKEN_URL: https://omapi.osinfra.cn/oneid/oidc/token
-  OAUTH_REDIRECT_URL: https://eulermaker.compass-ci.openeuler.openatom.cn/oauth
+  OAUTH_REDIRECT_URL: https://eulermaker.openeuler.openatom.cn/oauth
   PUBLIC_KEY_URL: https://omapi.osinfra.cn/oneid/public/key?community=openeuler
 ```
 
@@ -143,12 +143,12 @@ config.json:
     "my_specs": [
         {
             "spec_name": "gcc",
-            "spec_url": "https://gitee.com/src-openeuler/gcc.git",
+            "spec_url": "https://atomgit.com/src-openeuler/gcc.git",
             "spec_branch": "openEuler-20.03-LTS"
         },
         {
             "spec_name": "python-flask",
-            "spec_url": "https://gitee.com/src-openeuler/python-flask.git",
+            "spec_url": "https://atomgit.com/src-openeuler/python-flask.git",
             "spec_branch": "openEuler-20.03-LTS"
         }
     ],
@@ -185,7 +185,7 @@ update.json:
     "my_specs+": [
         {
         	"spec_name": "python-flask",
-		    "spec_url": "https://gitee.com/src-openeuler/python-flask.git",
+		    "spec_url": "https://atomgit.com/src-openeuler/python-flask.git",
 		    "spec_branch": "master"
         },
         ...
@@ -368,8 +368,8 @@ ccb build os_project=xx build_type=specified --json select_pkgs.json  #os_projec
 #### 特技
 
 1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+2.  Gitee 官方博客 [blog.atomgit.com](https://blog.atomgit.com)
+3.  你可以 [https://atomgit.com/explore](https://atomgit.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
+4.  [GVP](https://atomgit.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
+5.  Gitee 官方提供的使用手册 [https://atomgit.com/help](https://atomgit.com/help)
+6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://atomgit.com/atomgit-stars/](https://atomgit.com/atomgit-stars/)

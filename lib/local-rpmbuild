@@ -228,6 +228,21 @@ find_spec_file()
 
 check_specfile_exist()
 {
+	has_lan_ip_repo=false
+	for file in /etc/yum.repos.d/*.repo; do
+		if grep -Eo 'https?://(10\.[0-9]+\.[0-9]+\.[0-9]+|172\.(1[6-9]|2[0-9]|3[0-1])\.[0-9]+\.[0-9]+|192\.168\.[0-9]+\.[0-9]+)' "$file" > /dev/null; then
+			has_lan_ip_repo=true
+			break
+		fi
+	done
+
+	if [ "$has_lan_ip_repo" = false ]; then
+		dnf install -y git dnf-utils
+		dnf install -y git-lfs || true
+	else
+		echo "repo with LAN IP found, skipping git-lfs installation"
+	fi
+	
 	git config --global http.lowSpeedLimit 0
 	git config --global http.lowSpeedTime 3600
 	git config --global lfs.activitytimeout 3600
@@ -309,7 +324,7 @@ git_lfs_clone()
 		if [[ "${i}" -gt 1 ]];then
 			sleep 3
 		fi
-		git lfs clone ${1} -b ${2} --depth=1 2>/dev/null || continue
+		git lfs clone ${1} -b ${2} --depth=1 2>/dev/null || git clone ${1} -b ${2} --depth=1 2>/dev/null || continue
 		return 0
 	done
 	return 1
@@ -341,7 +356,7 @@ adapt_kernel()
 {
 	local old_pwd=$(pwd)
 	cd /tmp/
-	git_lfs_clone "https://gitee.com/openEuler/kernel" "$(cat ${source_dir}/SOURCE)"
+	git_lfs_clone "https://atomgit.com/openEuler/kernel" "$(cat ${source_dir}/SOURCE)"
 	tar -czvf kernel.tar.gz --exclude=.git* kernel >/dev/null
 	mv kernel.tar.gz ${source_dir} || die "failed to adapt kernel"
 	cd ${old_pwd}
@@ -349,16 +364,16 @@ adapt_kernel()
 
 create_kernel_gz()
 {
-	git_lfs_clone "https://gitee.com/src-openeuler/kernel.git src-kernel" "${spec_branch}"
+	git_lfs_clone "https://atomgit.com/src-openeuler/kernel.git src-kernel" "${spec_branch}"
 	local tags=$(cat src-kernel/SOURCE)
-	git_lfs_clone "https://gitee.com/openeuler/kernel" "${tags}"
+	git_lfs_clone "https://atomgit.com/openeuler/kernel" "${tags}"
 	tar -czvf kernel.tar.gz --exclude=.git* kernel >/dev/null
 	mv kernel.tar.gz ${source_dir} || die "failed to create kernel gz"
 }
 
 create_kata_integration()
 {
-	git_lfs_clone "https://gitee.com/src-openeuler/kata_integration" "${spec_branch}"
+	git_lfs_clone "https://atomgit.com/src-openeuler/kata_integration" "${spec_branch}"
 	local file_name=$(cat ${spec_dir}/${spec_name} | grep 'Source0: '| awk '{print $NF}')
 	tar -czvf ${file_name} -C kata_integration --exclude=.git* . >/dev/null
 	mv ${file_name} ${source_dir} || die " failed to create ${file_name}"
@@ -368,7 +383,7 @@ create_kata_containers()
 {
 	local old_pwd=$(pwd)
 	cd /tmp/
-	git_lfs_clone "https://gitee.com/src-openeuler/kata-containers" "${spec_branch}"
+	git_lfs_clone "https://atomgit.com/src-openeuler/kata-containers" "${spec_branch}"
 	local version=$(cat ${spec_dir}/${spec_name} | grep '%define VERSION '| awk '{print $NF}')
 	local source1_value=$(cat ${spec_dir}/${spec_name} |grep 'Source1: '|awk '{print $NF}')
 	local file_name=${source1_value/\%\{version\}/${version}}
@@ -381,7 +396,7 @@ create_kuasar_gz()
 {
 	local old_pwd=$(pwd)
 	cd /tmp/
-	git_lfs_clone "https://gitee.com/src-openeuler/kuasar" "${spec_branch}"
+	git_lfs_clone "https://atomgit.com/src-openeuler/kuasar" "${spec_branch}"
 	local file_name=$(cat ${spec_dir}/${spec_name} | grep 'Source0: '| awk '{print $NF}')
 	rm -f kuasar/kuasar.spec
 	tar -czvf ${file_name} -C kuasar --exclude=.git* . >/dev/null
@@ -420,7 +435,7 @@ adapt_kata_integration()
 	else
 		old_pwd=$(pwd)
 		cd /tmp/
-		git_lfs_clone "https://gitee.com/src-openeuler/kata_integration" "${spec_branch}"
+		git_lfs_clone "https://atomgit.com/src-openeuler/kata_integration" "${spec_branch}"
 		local version=$(cat ${spec_dir}/${spec_name} | grep '%define VERSION' | awk '{print $NF}')
 		local name=$(cat ${spec_dir}/${spec_name}  | grep 'Name:' | awk '{print $NF}')
 		local source_value=$(cat ${spec_dir}/${spec_name} | grep 'Source0: ' | awk '{print $NF}'| awk -F '/' '{print $NF}')

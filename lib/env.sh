@@ -161,17 +161,17 @@ write_cli_config()
 
 	if [ ! -f "$config_file/config.yaml" ]; then
 		cat > "$config_file/config.yaml" <<-EOF
-		SRV_HTTP_REPOSITORIES_HOST: eulermaker.compass-ci.openeuler.openatom.cn
+		SRV_HTTP_REPOSITORIES_HOST: eulermaker.openeuler.openatom.cn
 		SRV_HTTP_REPOSITORIES_PORT: 443
 		SRV_HTTP_REPOSITORIES_PROTOCOL: https://
 		SRV_HTTP_RESULT_PROTOCOL: https://
-		SRV_HTTP_RESULT_HOST: eulermaker.compass-ci.openeuler.openatom.cn
+		SRV_HTTP_RESULT_HOST: eulermaker.openeuler.openatom.cn
 		SRV_HTTP_RESULT_PORT: 443
-		SRV_URL: https://eulermaker.compass-ci.openeuler.openatom.cn
-		GATEWAY_IP: eulermaker.compass-ci.openeuler.openatom.cn
+		SRV_URL: https://eulermaker.openeuler.openatom.cn
+		GATEWAY_IP: eulermaker.openeuler.openatom.cn
 		GATEWAY_PORT: 443
 		OAUTH_TOKEN_URL: https://omapi.osinfra.cn/oneid/oidc/token
-		OAUTH_REDIRECT_URL: https://eulermaker.compass-ci.openeuler.openatom.cn/oauth/
+		OAUTH_REDIRECT_URL: https://eulermaker.openeuler.openatom.cn/oauth/
 		PUBLIC_KEY_URL: https://omapi.osinfra.cn/oneid/public/key?community=openeuler
 		ACCOUNT: 
 		PASSWORD: 

@@ -155,7 +155,7 @@ def modify_config_hash(job_info, config_hash)
     config_hash["issue_date"] = job_info["issue_date"]
     config_hash["pr_merge_reference_name"] = job_info["pr_merge_reference_name"]
     config_hash["install_depend_packages_all"] = job_info["install_depend_packages_all"]
-    config_hash["spec_url"] = "https://gitee.com/openeuler/#{config_hash['package']}"
+    config_hash["spec_url"] = "https://atomgit.com/openeuler/#{config_hash['package']}"
   else
     if config_hash.has_key?("use_root")
       config_hash["build_user"] = "root"
@@ -163,7 +163,7 @@ def modify_config_hash(job_info, config_hash)
       config_hash['build_user'] = "lkp"
     end
     config_hash["run_shell"] = "local-rpmbuild"
-    config_hash["spec_url"] = "https://gitee.com/src-openeuler/#{config_hash['package']}"
+    config_hash["spec_url"] = "https://atomgit.com/src-openeuler/#{config_hash['package']}"
   end
 end
 

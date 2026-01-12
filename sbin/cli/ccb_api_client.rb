@@ -106,6 +106,17 @@ class CcbApiClient
     end
   end
 
+  def get_access_token(account, password, grant_type='password')
+    params = {
+      grant_type: grant_type,
+      account: account,
+      password: password
+    }
+    query = URI.encode_www_form(params)
+    resource = RestClient::Resource.new("#{@url_prefix}#{@host}:#{@port}/api/user_auth/oauth_authorize?#{query}")
+    resource.get
+  end
+
   private def url_prefix
     @url_prefix = if @host.match('.*[a-zA-Z]+.*')
                     # Internet users should use domain name and https

@@ -181,13 +181,23 @@ def get_jwt_from_remote(status, config)
     access_token = body['msg']['token']
   end
   if access_token
-    FileUtils.mkdir_p "#{ENV['HOME']}/.config/cli" unless File.directory? "#{ENV['HOME']}/.config/cli"
-    aFile = File.new("#{ENV['HOME']}/.config/cli/jwt", "w+")
-    if aFile
-      aFile.syswrite(access_token)
-    else
-      puts 'save jwt faild'
+    config_dir = "#{ENV['HOME']}/.config/cli"
+    jwt_file = "#{config_dir}/jwt"
+    
+    FileUtils.mkdir_p config_dir unless File.directory? config_dir
+    
+    unless RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/
+      File.chmod(0700, config_dir) if File.directory? config_dir
     end
+    
+    File.open(jwt_file, "w+") do |file|
+      file.syswrite(access_token)
+    end
+    
+    unless RbConfig::CONFIG['host_os'] =~ /mswin|mingw|cygwin/
+      File.chmod(0600, jwt_file)
+    end
+    
     return access_token
   else
     return nil

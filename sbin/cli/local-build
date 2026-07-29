@@ -17,8 +17,7 @@ debug_stage = nil
 clean_flag = false
 local_image = nil
 config_hash = {}
-dailybuild_hash = {"local" => "http://172.16.1.236:31744",
-                   "remote" => "http://121.36.84.172"}
+dailybuild_hash = nil
 
 options = OptionParser.new do |opts|
   opts.banner = 'Usage: ccb local-build key1=val1 key2=val2... [options]'
@@ -467,6 +466,17 @@ else
 end
 
 my_config = load_my_config
+
+dailybuild_hash = {
+  "local" => my_config['DAILYBUILD_LOCAL'],
+  "remote" => my_config['DAILYBUILD_REMOTE']
+}
+
+if dailybuild_hash["local"].nil? || dailybuild_hash["remote"].nil?
+  puts "[ERROR] Please add DAILYBUILD_LOCAL and DAILYBUILD_REMOTE to #{ENV['HOME']}/.config/cli/defaults/config.yaml"
+  exit
+end
+
 if my_config.has_key?("SRV_URL")
   config_hash['repo_prefix'] = my_config['SRV_URL']
 else

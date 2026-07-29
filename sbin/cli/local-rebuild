@@ -11,8 +11,7 @@ require 'fileutils'
 require "#{LKP_SRC}/sbin/cli/ccb_common"
 require "#{LKP_SRC}/sbin/cli/ccb_api_client"
 
-dailybuild_hash = {"local" => "http://172.16.1.236:31744",
-                   "remote" => "http://121.36.84.172"}
+dailybuild_hash = nil
 show_docker = false
 config_hash = {}
 
@@ -251,6 +250,17 @@ if job_id.empty?
 end
 
 my_config = load_my_config
+
+dailybuild_hash = {
+  "local" => my_config['DAILYBUILD_LOCAL'],
+  "remote" => my_config['DAILYBUILD_REMOTE']
+}
+
+if dailybuild_hash["local"].nil? || dailybuild_hash["remote"].nil?
+  puts "[ERROR] Please add DAILYBUILD_LOCAL and DAILYBUILD_REMOTE to #{ENV['HOME']}/.config/cli/defaults/config.yaml"
+  exit
+end
+
 env_arch = RbConfig::CONFIG['arch'].split('-')[0]
 config_hash["env_arch"] = env_arch
 

@@ -1,0 +1,11 @@
+# markdownlint 配置：先放宽适配存量文档，后续按需收紧
+default: true
+MD001: false   # 模板 README 使用 # 后直接接 #### 小节；清理 PR 统一为 ## 后可收紧
+MD013:
+  line_length: 120
+MD033: false   # inline HTML
+MD036: false   # README 有意用加粗文本作为小节标题；转正式标题后可收紧
+MD041: false   # 首行必须是一级标题
+MD024: false   # 重复标题
+MD040: false   # 代码块缺语言标签（存量文档常见且不可自动修复；清理 PR 补语言后再收紧）
+# 按基线预检结果补充豁免；真实格式问题进清理 PR

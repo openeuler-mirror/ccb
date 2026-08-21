@@ -1,0 +1,22 @@
+# 与 Shfmt 配合
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{sh,bash,zsh}]
+indent_style = tab
+
+# 无扩展名的 shell 可执行脚本不会被上面的通配段匹配，
+# shfmt 会退回默认 tab；如需保留项目缩进风格，按文件名单独声明：
+[lib/local-hotpatch]
+indent_style = tab
+
+[lib/local-rpmbuild]
+indent_style = tab
+
+[sbin/cli/ccb]
+indent_style = tab

@@ -14,6 +14,22 @@ ruby 版本不一致导致的行为差异。
 2. 或命令行：`devcontainer up --workspace-folder .`（需 devcontainer CLI）。
 
 首次构建会执行 `dnf update` 和 `gem install rest-client`，需要能访问 repo.openeuler.org 与 rubygems.org。
+纯内网环境可先设置 `CCB_DNF_MIRROR` / `CCB_GEM_MIRROR`（见下节）指向内网镜像源。
+
+## 内网构建镜像源（可选）
+
+宿主机设置以下环境变量后 **Reopen in Container**，会经 `devcontainer.json` 的 `build.args`
+传入 Dockerfile；两个参数留空（默认）时使用公网官方源，行为与之前一致：
+
+| 宿主机变量 | 构建参数 | 用途 |
+| --- | --- | --- |
+| `CCB_DNF_MIRROR` | `DNF_MIRROR` | openEuler dnf 仓库镜像基址（见下方说明） |
+| `CCB_GEM_MIRROR` | `GEM_MIRROR` | rubygems 镜像源地址（见下方说明） |
+
+- `CCB_DNF_MIRROR` 须含 scheme，如 `http://mirror.internal/openeuler`；非空时把 `.repo` 中的
+  `repo.openeuler.org` 整体替换（baseurl 与 gpgkey 同步替换），镜像需完整镜像 openEuler 仓库目录结构。
+- `CCB_GEM_MIRROR` 如 `https://mirrors.tuna.tsinghua.edu.cn/rubygems/`；非空时替换默认
+  `https://rubygems.org/`。
 
 ## 范围边界
 

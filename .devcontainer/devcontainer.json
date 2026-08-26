@@ -4,7 +4,9 @@
   "build": {
     "dockerfile": "Dockerfile",
     "args": {
-      "TZ": "${localEnv:TZ:Asia/Shanghai}"
+      "TZ": "${localEnv:TZ:Asia/Shanghai}",
+      "DNF_MIRROR": "${localEnv:CCB_DNF_MIRROR:}",
+      "GEM_MIRROR": "${localEnv:CCB_GEM_MIRROR:}"
     }
   },
   "runArgs": [],
